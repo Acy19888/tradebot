@@ -6,9 +6,14 @@ import "fmt"
 // sections of cfg. It prints the same connection messages as the daemon startup path
 // so callers (main and CLI subcommands alike) see consistent output. The returned
 // cleanup function must be deferred by the caller to close gateway connections.
-func buildNotifierFromConfig(cfg *Config) (*MultiNotifier, func()) {
+//
+// Returns the *TelegramNotifier directly so main.go can attach the
+// TelegramCommandHandler (Phase 1 #TBD). Nil when Telegram is disabled or its
+// init failed — callers must nil-check.
+func buildNotifierFromConfig(cfg *Config) (*MultiNotifier, *TelegramNotifier, func()) {
 	var backends []notifierBackend
 	var closers []func()
+	var tgNotifier *TelegramNotifier
 
 	if cfg.Discord.Enabled && cfg.Discord.Token != "" {
 		discord, err := NewDiscordNotifier(cfg.Discord.Token, cfg.Discord.OwnerID)
@@ -37,9 +42,14 @@ func buildNotifierFromConfig(cfg *Config) (*MultiNotifier, func()) {
 		if err != nil {
 			fmt.Printf("[WARN] Telegram init failed: %v — continuing without Telegram\n", err)
 		} else {
+			// Start the single shared update broker so AskDM and
+			// TelegramCommandHandler can both Subscribe without racing on
+			// the getUpdates offset. Idempotent.
+			tg.StartUpdateBroker()
+			tgNotifier = tg
 			fmt.Printf("Telegram bot connected (%d channels", len(cfg.Telegram.Channels))
 			if cfg.Telegram.OwnerChatID != "" {
-				fmt.Printf(", DM owner enabled")
+				fmt.Printf(", DM owner enabled, commands enabled")
 			}
 			fmt.Println(")")
 			backends = append(backends, notifierBackend{
@@ -59,5 +69,5 @@ func buildNotifierFromConfig(cfg *Config) (*MultiNotifier, func()) {
 			c()
 		}
 	}
-	return NewMultiNotifier(backends...), cleanup
+	return NewMultiNotifier(backends...), tgNotifier, cleanup
 }

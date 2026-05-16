@@ -271,9 +271,26 @@ func main() {
 	}()
 
 	// Initialize notification backends (Discord and/or Telegram).
-	notifier, cleanupNotifier := buildNotifierFromConfig(cfg)
+	notifier, tgNotifier, cleanupNotifier := buildNotifierFromConfig(cfg)
 	defer cleanupNotifier()
 	fmt.Printf("Notification backends: %d active\n", notifier.BackendCount())
+
+	// Telegram slash-commands (Phase 1a): /help, /status, /positions,
+	// /killswitch. Owner-authed via cfg.Telegram.OwnerChatID. Nil-safe — when
+	// Telegram is disabled, owner missing, or the broker isn't running,
+	// NewTelegramCommandHandler returns nil and Start is a no-op.
+	tgCommands := NewTelegramCommandHandler(
+		tgNotifier,
+		cfg.Telegram.OwnerChatID,
+		state,
+		&mu,
+		cfg,
+		func() error { return SaveStateWithDB(state, cfg, stateDB) },
+	)
+	if tgCommands != nil && tgCommands.Start() {
+		fmt.Println("Telegram /commands enabled (owner-authed)")
+		defer tgCommands.Stop()
+	}
 
 	// Phase 2 + 3 of graceful shutdown — registered AFTER cleanupNotifier so
 	// LIFO ordering puts this defer BEFORE notifier flush. Sequence on

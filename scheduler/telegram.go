@@ -2,17 +2,29 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const telegramAPIBase = "https://api.telegram.org/bot"
 const telegramMaxMessageLen = 4096
+
+// updateSubscription is a single registered listener for Telegram updates
+// dispatched by the broker (see StartUpdateBroker). Filter returns true to
+// deliver the update on ch; channels are buffered so a slow consumer drops
+// updates rather than stalling the broker.
+type updateSubscription struct {
+	id     int64
+	ch     chan telegramUpdate
+	filter func(telegramUpdate) bool
+}
 
 // TelegramNotifier implements Notifier using the Telegram Bot API.
 type TelegramNotifier struct {
@@ -23,6 +35,17 @@ type TelegramNotifier struct {
 	lastUpdate  int64  // offset for getUpdates polling
 	mu          sync.Mutex
 	closed      bool
+
+	// Update broker (opt-in via StartUpdateBroker). When running, AskDM and
+	// any other consumer (e.g. TelegramCommandHandler) Subscribe instead of
+	// polling getUpdates directly — avoids racing on lastUpdate offset.
+	subMu         sync.Mutex
+	subscribers   []*updateSubscription
+	subSeq        int64
+	brokerCtx     context.Context
+	brokerCancel  context.CancelFunc
+	brokerWG      sync.WaitGroup
+	brokerStarted atomic.Bool
 }
 
 // NewTelegramNotifier creates a new Telegram bot notifier.
@@ -44,6 +67,115 @@ func NewTelegramNotifier(botToken, ownerChatID string) (*TelegramNotifier, error
 	}
 
 	return t, nil
+}
+
+// StartUpdateBroker spawns a single long-running goroutine that polls
+// getUpdates and fans out each update to all matching subscribers. Idempotent:
+// calling more than once is a no-op. Must be called AFTER NewTelegramNotifier
+// succeeds (so getMe has verified the token). Production code calls this from
+// notifier_build.go; tests that only exercise SendMessage/SendDM may skip it.
+func (t *TelegramNotifier) StartUpdateBroker() {
+	if !t.brokerStarted.CompareAndSwap(false, true) {
+		return
+	}
+	t.brokerCtx, t.brokerCancel = context.WithCancel(context.Background())
+	t.brokerWG.Add(1)
+	go t.brokerLoop()
+}
+
+// Subscribe registers a filtered update listener. Returns the channel updates
+// arrive on and an unsubscribe function that MUST be called (defer is fine) to
+// remove the subscription and release the buffered channel. Filter is called
+// with the broker's subMu held — keep it cheap and side-effect-free.
+//
+// When the broker is not running, returns a closed channel and a no-op
+// unsubscribe so callers can write code that works in either mode.
+func (t *TelegramNotifier) Subscribe(filter func(telegramUpdate) bool) (<-chan telegramUpdate, func()) {
+	if !t.brokerStarted.Load() {
+		closed := make(chan telegramUpdate)
+		close(closed)
+		return closed, func() {}
+	}
+	sub := &updateSubscription{
+		id:     atomic.AddInt64(&t.subSeq, 1),
+		ch:     make(chan telegramUpdate, 16),
+		filter: filter,
+	}
+	t.subMu.Lock()
+	t.subscribers = append(t.subscribers, sub)
+	t.subMu.Unlock()
+	return sub.ch, func() { t.unsubscribe(sub.id) }
+}
+
+func (t *TelegramNotifier) unsubscribe(id int64) {
+	t.subMu.Lock()
+	defer t.subMu.Unlock()
+	for i, s := range t.subscribers {
+		if s.id == id {
+			t.subscribers = append(t.subscribers[:i], t.subscribers[i+1:]...)
+			close(s.ch)
+			return
+		}
+	}
+}
+
+// brokerLoop is the single owner of getUpdates polling once the broker is
+// started. It runs until brokerCtx is cancelled (by Close). Errors are logged
+// at most once per logInterval to avoid flooding when the bot is unreachable.
+func (t *TelegramNotifier) brokerLoop() {
+	defer t.brokerWG.Done()
+
+	const pollTimeoutSec = 25
+	const errLogInterval = 60 * time.Second
+	var lastErrLog time.Time
+
+	for {
+		select {
+		case <-t.brokerCtx.Done():
+			return
+		default:
+		}
+		updates, err := t.getUpdates(pollTimeoutSec)
+		if err != nil {
+			// Throttled error logging — broker keeps polling.
+			if time.Since(lastErrLog) > errLogInterval {
+				fmt.Printf("[telegram] broker getUpdates: %v\n", err)
+				lastErrLog = time.Now()
+			}
+			// Light backoff so we don't hammer the API in a tight error loop.
+			select {
+			case <-t.brokerCtx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
+			continue
+		}
+		for _, u := range updates {
+			t.dispatch(u)
+		}
+	}
+}
+
+// dispatch delivers an update to every subscriber whose filter returns true.
+// Non-blocking — if a subscriber's channel is full, the update is dropped for
+// that subscriber (logged once). Keeps the broker loop pumping regardless of
+// slow consumers.
+func (t *TelegramNotifier) dispatch(u telegramUpdate) {
+	t.subMu.Lock()
+	subs := make([]*updateSubscription, len(t.subscribers))
+	copy(subs, t.subscribers)
+	t.subMu.Unlock()
+
+	for _, s := range subs {
+		if s.filter != nil && !s.filter(u) {
+			continue
+		}
+		select {
+		case s.ch <- u:
+		default:
+			fmt.Printf("[telegram] dropping update %d for subscriber %d (channel full)\n", u.UpdateID, s.id)
+		}
+	}
 }
 
 // telegramResponse is the generic Telegram Bot API response envelope.
@@ -146,7 +278,11 @@ func (t *TelegramNotifier) SendDM(userID, content string) error {
 	return t.SendMessage(userID, content)
 }
 
-// AskDM sends a question to the user and polls for a reply within the timeout.
+// AskDM sends a question to the user and waits for a reply within the timeout.
+// When the broker is running (production), subscribes to filtered updates so
+// AskDM does not race with other consumers (e.g. TelegramCommandHandler) for
+// the same getUpdates offset. When the broker is not running (legacy tests),
+// falls back to direct inline polling of getUpdates.
 func (t *TelegramNotifier) AskDM(userID, question string, timeout time.Duration) (string, error) {
 	sentAt := time.Now().Unix()
 
@@ -154,6 +290,30 @@ func (t *TelegramNotifier) AskDM(userID, question string, timeout time.Duration)
 		return "", fmt.Errorf("send question: %w", err)
 	}
 
+	// Broker path — race-free single-poller mode.
+	if t.brokerStarted.Load() {
+		ch, unsub := t.Subscribe(func(u telegramUpdate) bool {
+			if u.Message == nil || u.Message.From == nil {
+				return false
+			}
+			fromID := fmt.Sprintf("%d", u.Message.From.ID)
+			return fromID == userID && u.Message.Date >= sentAt-2
+		})
+		defer unsub()
+
+		select {
+		case u, ok := <-ch:
+			if !ok {
+				return "", ErrDMTimeout
+			}
+			return strings.TrimSpace(u.Message.Text), nil
+		case <-time.After(timeout):
+			return "", ErrDMTimeout
+		}
+	}
+
+	// Legacy inline-polling path — preserved so tests that instantiate
+	// TelegramNotifier without calling StartUpdateBroker still work.
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		t.mu.Lock()
@@ -227,11 +387,31 @@ func (t *TelegramNotifier) getUpdates(timeoutSec int) ([]telegramUpdate, error) 
 	return updates, nil
 }
 
-// Close marks the notifier as closed and stops any pending polling.
+// Close marks the notifier as closed and stops any pending polling. When the
+// update broker has been started it also cancels the broker context and waits
+// for the polling goroutine to exit, then closes any remaining subscriber
+// channels so subscribers waiting on <-ch unblock cleanly.
 func (t *TelegramNotifier) Close() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	if t.closed {
+		t.mu.Unlock()
+		return
+	}
 	t.closed = true
+	t.mu.Unlock()
+
+	if t.brokerStarted.Load() && t.brokerCancel != nil {
+		t.brokerCancel()
+		t.brokerWG.Wait()
+	}
+
+	// Close any remaining subscriber channels so consumers unblock.
+	t.subMu.Lock()
+	for _, s := range t.subscribers {
+		close(s.ch)
+	}
+	t.subscribers = nil
+	t.subMu.Unlock()
 }
 
 // FormatTradeDMPlain formats a Trade into a plain-text DM (no Discord markdown).

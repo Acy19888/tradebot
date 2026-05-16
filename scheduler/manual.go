@@ -249,7 +249,9 @@ func runManualOpen(args []string) int {
 	fmt.Printf("Filled: %s %.6f %s @ $%.4f (fee=$%.4f)\n", *side, fillQty, sc.Symbol, resolvedFillPrice, fillFee)
 
 	// Build notifier for warning paths (no-op when Discord/Telegram not configured).
-	notifier, closeNotifier := buildNotifierFromConfig(cfg)
+	// CLI subcommands don't run the command handler; the returned *TelegramNotifier
+	// is discarded.
+	notifier, _, closeNotifier := buildNotifierFromConfig(cfg)
 	defer closeNotifier()
 
 	effectiveATRMult := *slATRMult
