@@ -109,6 +109,29 @@ func (ss *StatusServer) handleDashboard(w http.ResponseWriter, r *http.Request) 
 	http.StripPrefix("/dashboard/", http.FileServer(http.FS(sub))).ServeHTTP(w, r)
 }
 
+// handleDashboardV2 serves the Phase 2 dashboard from static/ui/v2/.
+// The original /dashboard (v1) remains intact for fallback / regression
+// comparison during the A/B test phase. Operators can pin to v1 by URL.
+func (ss *StatusServer) handleDashboardV2(w http.ResponseWriter, r *http.Request) {
+	if ss.rejectIfDraining(w) {
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	sub, err := fs.Sub(uiAssets, "static/ui/v2")
+	if err != nil {
+		http.Error(w, "v2 ui assets unavailable", http.StatusInternalServerError)
+		return
+	}
+	if r.URL.Path == "/dashboard/v2" || r.URL.Path == "/dashboard/v2/" {
+		http.ServeFileFS(w, r, sub, "index.html")
+		return
+	}
+	http.StripPrefix("/dashboard/v2/", http.FileServer(http.FS(sub))).ServeHTTP(w, r)
+}
+
 func (ss *StatusServer) handleAPIStrategies(w http.ResponseWriter, r *http.Request) {
 	if ss.rejectIfDraining(w) {
 		return

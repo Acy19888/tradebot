@@ -192,6 +192,15 @@ func (ss *StatusServer) Start(port int) {
 	mux.HandleFunc("/api/strategies", ss.handleAPIStrategies)
 	mux.HandleFunc("/api/strategies/", ss.handleAPIStrategy)
 
+	// Dashboard v2 — aggregate views (Phase 2). Read-only, layered on top of
+	// the existing /status surface. Old /dashboard route stays as-is.
+	mux.HandleFunc("/api/v2/portfolio", ss.handleAPIV2Portfolio)
+	mux.HandleFunc("/api/v2/pnl", ss.handleAPIV2PnL)
+	mux.HandleFunc("/api/v2/equity-curve", ss.handleAPIV2EquityCurve)
+	mux.HandleFunc("/api/v2/trades", ss.handleAPIV2Trades)
+	mux.HandleFunc("/dashboard/v2", ss.handleDashboardV2)
+	mux.HandleFunc("/dashboard/v2/", ss.handleDashboardV2)
+
 	listener, boundPort, err := bindWithFallback(port, statusPortMaxAttempts)
 	if err != nil {
 		fmt.Printf("[server] WARNING: %v. Status endpoint unavailable.\n", err)

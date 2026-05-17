@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=2">
+    <meta name="theme-color" content="#0f172a">
+    <title>go-trader · Portfolio</title>
+    <link rel="stylesheet" href="/dashboard/v2/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">gt</span>
+        <div>
+          <h1>Portfolio</h1>
+          <p id="last-cycle" class="muted">—</p>
+        </div>
+      </div>
+      <nav class="tabs" role="tablist">
+        <button class="tab" data-view="overview" role="tab" aria-selected="true">Overview</button>
+        <button class="tab" data-view="trades" role="tab">Trades</button>
+      </nav>
+      <div class="toolbar">
+        <select id="window-select" aria-label="Window">
+          <option value="24h">24h</option>
+          <option value="7d" selected>7d</option>
+          <option value="30d">30d</option>
+          <option value="all">All</option>
+        </select>
+        <button id="refresh" class="icon-btn" title="Refresh">↻</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <!-- OVERVIEW VIEW -->
+      <section id="view-overview" class="view active">
+        <div class="banner" id="kill-switch-banner" hidden>🛑 KILL SWITCH ACTIVE</div>
+
+        <div class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-label">Portfolio Value</div>
+            <div class="kpi-value" id="kpi-value">—</div>
+            <div class="kpi-sub" id="kpi-value-sub">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Realized P&amp;L (window)</div>
+            <div class="kpi-value" id="kpi-pnl-window">—</div>
+            <div class="kpi-sub" id="kpi-pnl-window-sub">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Max Drawdown (current)</div>
+            <div class="kpi-value" id="kpi-dd">—</div>
+            <div class="kpi-sub" id="kpi-dd-sub">—</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label">Cycles · Strategies · Open Pos</div>
+            <div class="kpi-value" id="kpi-counts">—</div>
+            <div class="kpi-sub muted">running</div>
+          </div>
+        </div>
+
+        <div class="pnl-grid" aria-label="P&amp;L breakdowns">
+          <!-- four mini-cards populated by JS -->
+        </div>
+
+        <section class="chart-section">
+          <div class="section-header">
+            <h2>Equity Curve</h2>
+            <span class="muted" id="equity-summary">realized · all strategies</span>
+          </div>
+          <div id="chart" class="chart-host"></div>
+          <p id="chart-empty" class="empty muted" hidden>No closed trades in this window yet.</p>
+        </section>
+
+        <section class="positions-section">
+          <div class="section-header">
+            <h2>Open Positions</h2>
+          </div>
+          <div id="positions-list"></div>
+        </section>
+      </section>
+
+      <!-- TRADES VIEW -->
+      <section id="view-trades" class="view">
+        <div class="filter-bar">
+          <label>
+            <span>Strategy</span>
+            <select id="filter-strategy"><option value="">All</option></select>
+          </label>
+          <label>
+            <span>Filter</span>
+            <select id="filter-result">
+              <option value="all">All</option>
+              <option value="win">Wins only</option>
+              <option value="loss">Losses only</option>
+            </select>
+          </label>
+          <label>
+            <span>Limit</span>
+            <select id="filter-limit">
+              <option value="50">50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+            </select>
+          </label>
+        </div>
+        <div class="trades-wrap">
+          <table id="trades-table" class="trades">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Strategy</th>
+                <th>Symbol</th>
+                <th>Side</th>
+                <th>Qty</th>
+                <th>Price</th>
+                <th>P&amp;L</th>
+                <th>Fees</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <p id="trades-empty" class="empty muted" hidden>No trades for these filters.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span id="status-text">Loading…</span>
+      <a href="/dashboard">v1 dashboard ↗</a>
+    </footer>
+
+    <script src="/dashboard/v2/lightweight-charts.standalone.production.js"></script>
+    <script src="/dashboard/v2/app.js"></script>
+  </body>
+</html>
