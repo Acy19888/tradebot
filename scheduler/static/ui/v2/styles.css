@@ -176,6 +176,32 @@ a:hover { text-decoration: underline; }
 .trades .side-buy { color: var(--positive); }
 .trades .side-sell { color: var(--negative); }
 
+/* News list */
+.news-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.news-item {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.news-item.sev-high { border-left-color: var(--negative); }
+.news-item.sev-medium { border-left-color: var(--warn); }
+.news-item.sev-low { border-left-color: var(--border); }
+.news-title { font-size: 0.95rem; font-weight: 500; }
+.news-title a { color: var(--fg); }
+.news-title a:hover { color: var(--accent); }
+.news-meta { display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.75rem; color: var(--fg-mute); }
+.news-meta .pill { padding: 0.1rem 0.45rem; border-radius: 4px; background: var(--bg-elev-2); }
+.news-meta .pill.coin { font-family: var(--mono); }
+.news-meta .pill.positive { color: var(--positive); background: rgba(16, 185, 129, 0.15); }
+.news-meta .pill.negative { color: var(--negative); background: rgba(239, 68, 68, 0.15); }
+.news-meta .pill.severity-high { color: var(--negative); background: rgba(239, 68, 68, 0.15); }
+.news-meta .pill.severity-medium { color: var(--warn); background: rgba(245, 158, 11, 0.15); }
+
 /* Footer */
 .footer {
   padding: 0.5rem 1rem;

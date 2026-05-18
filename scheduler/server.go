@@ -198,6 +198,7 @@ func (ss *StatusServer) Start(port int) {
 	mux.HandleFunc("/api/v2/pnl", ss.handleAPIV2PnL)
 	mux.HandleFunc("/api/v2/equity-curve", ss.handleAPIV2EquityCurve)
 	mux.HandleFunc("/api/v2/trades", ss.handleAPIV2Trades)
+	mux.HandleFunc("/api/v2/news", ss.handleAPIV2News)
 	mux.HandleFunc("/dashboard/v2", ss.handleDashboardV2)
 	mux.HandleFunc("/dashboard/v2/", ss.handleDashboardV2)
 

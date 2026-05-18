@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -286,10 +287,26 @@ func main() {
 		&mu,
 		cfg,
 		func() error { return SaveStateWithDB(state, cfg, stateDB) },
-	)
+	).WithStateDB(stateDB)
 	if tgCommands != nil && tgCommands.Start() {
 		fmt.Println("Telegram /commands enabled (owner-authed)")
 		defer tgCommands.Stop()
+	}
+
+	// News-awareness service (Phase 3a). Polls shared_scripts/fetch_news.py,
+	// persists to news_events, DMs the owner on first-seen high-severity
+	// items. Read-only with respect to trading state — does NOT influence
+	// order placement (that lands in Phase 3b). Nil-safe — if stateDB is
+	// missing the service is skipped.
+	newsService := NewNewsService(stateDB, notifier, NewsServiceConfig{
+		PollInterval:  10 * time.Minute,
+		SinceMinutes:  1440,
+		Limit:         100,
+		HighSevAlerts: true,
+	})
+	if newsService != nil && newsService.Start(context.Background()) {
+		fmt.Println("News-awareness service started (10min poll interval)")
+		defer newsService.Stop()
 	}
 
 	// Phase 2 + 3 of graceful shutdown — registered AFTER cleanupNotifier so

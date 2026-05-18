@@ -41,6 +41,11 @@ type TelegramCommandHandler struct {
 	// the SaveStateWithDB plumbing. Nil-safe so tests can omit it.
 	stateSaver func() error
 
+	// stateDB, when non-nil, unlocks read-only commands that need SQLite —
+	// e.g. /news pulls from news_events. Nil-safe: handlers degrade to a
+	// "DB unavailable" reply instead of panicking.
+	stateDB *StateDB
+
 	doneCh chan struct{}
 	wg     sync.WaitGroup
 }
@@ -68,6 +73,17 @@ func NewTelegramCommandHandler(
 		stateSaver: stateSaver,
 		doneCh:     make(chan struct{}),
 	}
+}
+
+// WithStateDB attaches a StateDB so SQLite-backed commands (/news in
+// Phase 3a, and the upcoming /pause | /resume | /close in Phase 1b) can
+// reach the database. Optional — handlers nil-check before use. Returns
+// the handler for fluent chaining.
+func (h *TelegramCommandHandler) WithStateDB(sdb *StateDB) *TelegramCommandHandler {
+	if h != nil {
+		h.stateDB = sdb
+	}
+	return h
 }
 
 // Start subscribes to Telegram updates and spawns a goroutine that processes
@@ -153,6 +169,8 @@ func (h *TelegramCommandHandler) handle(u telegramUpdate) {
 		reply = h.cmdStatus()
 	case "/positions":
 		reply = h.cmdPositions()
+	case "/news":
+		reply = h.cmdNews(rest)
 	case "/killswitch":
 		reply = h.cmdKillSwitch(rest)
 	default:
@@ -185,11 +203,87 @@ func (h *TelegramCommandHandler) cmdHelp() string {
 		"",
 		"/status      — portfolio summary, drawdown, kill switch state",
 		"/positions   — open positions per strategy",
+		"/news [coin] — recent news (optional coin filter, e.g. /news BTC)",
 		"/killswitch  — fire the portfolio kill switch (CONFIRM required)",
 		"/help        — this message",
 		"",
 		"Owner-only. Non-owner messages are ignored.",
 	}, "\n")
+}
+
+// cmdNews returns the most recent news events. Optional first argument
+// filters to a coin ticker (e.g. "/news BTC"). Defaults to medium+
+// severity to keep the chat-feed signal-dense; pass "low" to widen.
+func (h *TelegramCommandHandler) cmdNews(arg string) string {
+	if h.stateDB == nil {
+		return "News service not available (no DB)."
+	}
+	coin := ""
+	minSeverity := "medium"
+	for _, tok := range strings.Fields(strings.ToUpper(arg)) {
+		switch strings.ToLower(tok) {
+		case "ALL", "LOW":
+			minSeverity = "low"
+		case "HIGH":
+			minSeverity = "high"
+		case "MEDIUM":
+			minSeverity = "medium"
+		default:
+			// Treat any other token as a coin ticker.
+			if coin == "" {
+				coin = tok
+			}
+		}
+	}
+	events, err := h.stateDB.QueryRecentNewsEvents(minSeverity, coin, 10)
+	if err != nil {
+		return "News query failed: " + err.Error()
+	}
+	if len(events) == 0 {
+		filterLabel := minSeverity
+		if coin != "" {
+			filterLabel += " · " + coin
+		}
+		return "No news yet (filter: " + filterLabel + "). Service polls every 10 min."
+	}
+	var b strings.Builder
+	b.WriteString("📰 Latest news")
+	if coin != "" {
+		b.WriteString(" · " + coin)
+	}
+	if minSeverity != "" && minSeverity != "low" {
+		b.WriteString(" · " + minSeverity + "+")
+	}
+	b.WriteString("\n\n")
+	for i, e := range events {
+		sevIcon := "·"
+		switch e.Severity {
+		case "high":
+			sevIcon = "🔴"
+		case "medium":
+			sevIcon = "🟡"
+		case "low":
+			sevIcon = "⚪"
+		}
+		b.WriteString(fmt.Sprintf("%s %s\n", sevIcon, e.Title))
+		var meta []string
+		if e.Source != "" {
+			meta = append(meta, e.Source)
+		}
+		if e.Sentiment != "" && e.Sentiment != "neutral" {
+			meta = append(meta, e.Sentiment)
+		}
+		if len(e.Coins) > 0 {
+			meta = append(meta, strings.Join(e.Coins, ","))
+		}
+		if len(meta) > 0 {
+			b.WriteString("   " + strings.Join(meta, " · ") + "\n")
+		}
+		if i < len(events)-1 {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
 }
 
 // cmdStatus renders a compact portfolio summary. Read-only under RLock.

@@ -19,6 +19,7 @@
       <nav class="tabs" role="tablist">
         <button class="tab" data-view="overview" role="tab" aria-selected="true">Overview</button>
         <button class="tab" data-view="trades" role="tab">Trades</button>
+        <button class="tab" data-view="news" role="tab">News</button>
       </nav>
       <div class="toolbar">
         <select id="window-select" aria-label="Window">
@@ -78,6 +79,34 @@
           </div>
           <div id="positions-list"></div>
         </section>
+      </section>
+
+      <!-- NEWS VIEW -->
+      <section id="view-news" class="view">
+        <div class="filter-bar">
+          <label>
+            <span>Severity</span>
+            <select id="news-severity">
+              <option value="">All</option>
+              <option value="medium">Medium+</option>
+              <option value="high">High only</option>
+            </select>
+          </label>
+          <label>
+            <span>Coin</span>
+            <input id="news-coin" type="search" autocomplete="off" placeholder="BTC, ETH, …">
+          </label>
+          <label>
+            <span>Limit</span>
+            <select id="news-limit">
+              <option value="25">25</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+        </div>
+        <div id="news-list" class="news-list"></div>
+        <p id="news-empty" class="empty muted" hidden>No news events yet — service polls every 10 min after startup.</p>
       </section>
 
       <!-- TRADES VIEW -->

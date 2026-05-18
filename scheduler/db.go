@@ -222,6 +222,29 @@ CREATE TABLE IF NOT EXISTS pending_manual_actions (
     tp_oids_json TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
+
+-- News-awareness layer (Phase 3a). Populated by news_service via
+-- shared_scripts/fetch_news.py. id is a 16-char hash of (domain, title)
+-- so re-emitting the same item across polling windows is idempotent via
+-- INSERT OR IGNORE. coins stored as a JSON array (e.g. '["BTC","ETH"]')
+-- so existing strategies can join on a single string scan.
+CREATE TABLE IF NOT EXISTS news_events (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    domain TEXT NOT NULL DEFAULT '',
+    published_at TEXT NOT NULL,
+    coins TEXT NOT NULL DEFAULT '[]',
+    severity TEXT NOT NULL DEFAULT 'low',
+    sentiment TEXT NOT NULL DEFAULT 'neutral',
+    votes_important INTEGER NOT NULL DEFAULT 0,
+    seen_at TEXT NOT NULL DEFAULT '',
+    alerted INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_news_published ON news_events(published_at DESC);
+CREATE INDEX IF NOT EXISTS idx_news_severity ON news_events(severity);
 `
 
 // StateDB wraps a SQLite database for persistent state storage.

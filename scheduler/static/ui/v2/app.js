@@ -14,6 +14,10 @@ const API = {
     const q = new URLSearchParams(params).toString();
     return `/api/v2/trades?${q}`;
   },
+  news: (params) => {
+    const q = new URLSearchParams(params).toString();
+    return `/api/v2/news?${q}`;
+  },
   strategies: "/api/strategies",
 };
 
@@ -24,6 +28,9 @@ const state = {
   filterStrategy: "",
   filterResult: "all",
   filterLimit: 50,
+  newsSeverity: "",
+  newsCoin: "",
+  newsLimit: 50,
   view: "overview",
   refreshTimer: null,
 };
@@ -353,6 +360,91 @@ function switchView(view) {
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + view));
   if (view === "trades") {
     renderTrades();
+  } else if (view === "news") {
+    renderNews();
+  }
+}
+
+// ============================================================
+// News view
+// ============================================================
+
+function renderNewsItem(e) {
+  const sev = (e.severity || "low").toLowerCase();
+  const item = document.createElement("article");
+  item.className = "news-item sev-" + sev;
+
+  const titleEl = document.createElement("div");
+  titleEl.className = "news-title";
+  if (e.url) {
+    const a = document.createElement("a");
+    a.href = e.url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = e.title || "(no title)";
+    titleEl.appendChild(a);
+  } else {
+    titleEl.textContent = e.title || "(no title)";
+  }
+  item.appendChild(titleEl);
+
+  const meta = document.createElement("div");
+  meta.className = "news-meta";
+
+  if (sev === "high" || sev === "medium") {
+    const sevPill = document.createElement("span");
+    sevPill.className = "pill severity-" + sev;
+    sevPill.textContent = sev.toUpperCase();
+    meta.appendChild(sevPill);
+  }
+  if (e.sentiment && e.sentiment !== "neutral") {
+    const sp = document.createElement("span");
+    sp.className = "pill " + e.sentiment;
+    sp.textContent = e.sentiment;
+    meta.appendChild(sp);
+  }
+  for (const c of e.coins || []) {
+    const cp = document.createElement("span");
+    cp.className = "pill coin";
+    cp.textContent = c;
+    meta.appendChild(cp);
+  }
+  if (e.source) {
+    const sp = document.createElement("span");
+    sp.className = "pill";
+    sp.textContent = e.source;
+    meta.appendChild(sp);
+  }
+  if (e.published_at) {
+    const tp = document.createElement("span");
+    tp.className = "pill";
+    tp.textContent = fmtAgo(e.published_at);
+    tp.title = fmtTimestamp(e.published_at);
+    meta.appendChild(tp);
+  }
+  item.appendChild(meta);
+  return item;
+}
+
+async function renderNews() {
+  const list = $("#news-list");
+  list.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const params = { limit: state.newsLimit };
+    if (state.newsSeverity) params.min_severity = state.newsSeverity;
+    if (state.newsCoin) params.coin = state.newsCoin;
+    const data = await getJSON(API.news(params));
+    const events = data.events || [];
+    if (events.length === 0) {
+      list.innerHTML = "";
+      $("#news-empty").hidden = false;
+      return;
+    }
+    $("#news-empty").hidden = true;
+    list.innerHTML = "";
+    for (const e of events) list.appendChild(renderNewsItem(e));
+  } catch (err) {
+    list.innerHTML = `<p class="empty">News fetch error: ${err.message}</p>`;
   }
 }
 
@@ -375,6 +467,24 @@ function bind() {
     state.filterLimit = parseInt(e.target.value, 10) || 50;
     renderTrades();
   });
+
+  // News-tab filters
+  $("#news-severity").addEventListener("change", (e) => {
+    state.newsSeverity = e.target.value;
+    renderNews();
+  });
+  let newsCoinDebounce = null;
+  $("#news-coin").addEventListener("input", (e) => {
+    if (newsCoinDebounce) clearTimeout(newsCoinDebounce);
+    newsCoinDebounce = setTimeout(() => {
+      state.newsCoin = e.target.value.trim().toUpperCase();
+      renderNews();
+    }, 250);
+  });
+  $("#news-limit").addEventListener("change", (e) => {
+    state.newsLimit = parseInt(e.target.value, 10) || 50;
+    renderNews();
+  });
 }
 
 function startAutoRefresh() {
@@ -382,6 +492,7 @@ function startAutoRefresh() {
   state.refreshTimer = setInterval(() => {
     if (state.view === "overview") reloadAll();
     else if (state.view === "trades") renderTrades();
+    else if (state.view === "news") renderNews();
   }, 30000);
 }
 

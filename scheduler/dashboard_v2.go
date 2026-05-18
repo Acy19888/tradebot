@@ -348,6 +348,44 @@ func (ss *StatusServer) handleAPIV2EquityCurve(w http.ResponseWriter, r *http.Re
 	ss.writeV2JSON(w, r, resp)
 }
 
+// NewsV2Response wraps the news_events list with the applied filters
+// echoed back for the UI.
+type NewsV2Response struct {
+	MinSeverity string      `json:"min_severity,omitempty"`
+	Coin        string      `json:"coin,omitempty"`
+	Limit       int         `json:"limit"`
+	Events      []NewsEvent `json:"events"`
+}
+
+// handleAPIV2News is GET /api/v2/news[?min_severity=high|medium|low][&coin=BTC][&limit=N].
+// Read-only news feed for the dashboard's News tab. Pulls from the
+// news_events table populated by NewsService.
+func (ss *StatusServer) handleAPIV2News(w http.ResponseWriter, r *http.Request) {
+	if ss.stateDB == nil {
+		ss.writeV2JSON(w, r, NewsV2Response{Events: []NewsEvent{}})
+		return
+	}
+	q := r.URL.Query()
+	minSeverity := strings.ToLower(strings.TrimSpace(q.Get("min_severity")))
+	coin := strings.TrimSpace(q.Get("coin"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = 50
+	}
+	events, err := ss.stateDB.QueryRecentNewsEvents(minSeverity, coin, limit)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"query news failed"}`))
+		return
+	}
+	ss.writeV2JSON(w, r, NewsV2Response{
+		MinSeverity: minSeverity,
+		Coin:        coin,
+		Limit:       limit,
+		Events:      events,
+	})
+}
+
 // handleAPIV2Trades is GET /api/v2/trades[?strategy=...][&symbol=...][&filter=all|win|loss][&since=24h...][&limit=N][&offset=N].
 func (ss *StatusServer) handleAPIV2Trades(w http.ResponseWriter, r *http.Request) {
 	if ss.stateDB == nil {
