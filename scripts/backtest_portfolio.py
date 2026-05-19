@@ -36,10 +36,32 @@ import traceback
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-# Make backtest/ + shared_tools importable when invoked from repo root.
+# Wire up sys.path so the existing backtest framework loads even when
+# invoked from any cwd. The registry_loader expects multiple paths:
+#   - repo root (so `from shared_strategies.X import Y` resolves)
+#   - backtest/ (for run_backtest, backtester, reporter modules)
+#   - shared_strategies/open/ (registry_loader normally injects this
+#     itself, but if a strategy module imports another sibling via the
+#     bare module name we need the path early)
+#   - shared_strategies/open/spot/
+#   - shared_tools/
+# Also chdir to the repo root so data_fetcher's SQLite cache lookup
+# (which uses a relative ``shared_tools/`` style path internally) works.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(_REPO_ROOT, "backtest"))
-sys.path.insert(0, os.path.join(_REPO_ROOT, "shared_tools"))
+for _p in (
+    _REPO_ROOT,
+    os.path.join(_REPO_ROOT, "backtest"),
+    os.path.join(_REPO_ROOT, "shared_strategies", "open"),
+    os.path.join(_REPO_ROOT, "shared_strategies", "open", "spot"),
+    os.path.join(_REPO_ROOT, "shared_strategies", "open", "futures"),
+    os.path.join(_REPO_ROOT, "shared_tools"),
+):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+# Normalize cwd so any relative-path lookups (data cache, strategy
+# registry discovery, etc.) resolve consistently regardless of where
+# the operator invoked the script from.
+os.chdir(_REPO_ROOT)
 
 from run_backtest import run_single_backtest  # noqa: E402
 from reporter import format_single_report  # noqa: E402
