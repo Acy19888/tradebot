@@ -68,20 +68,43 @@ def test_classify_discard_negative_sharpe_small_sample_is_only_tune_or_untested(
     assert v == cs.TUNE
 
 
-def test_classify_discard_liquidation_level_drawdown():
+def test_classify_discard_liquidation_level_drawdown_negative_sign():
     """hl-range-hype-5m real case: Sharpe 1.82, +329% return, but
-    Max-DD -57.8% — the position would have been liquidated. DISCARD
-    regardless of headline Sharpe."""
-    v, reason = cs.classify(_row(sharpe=1.82, return_pct=329.2, max_dd_pct=57.8, trades=603))
+    Max-DD -57.8% — the backtester stores the drawdown as a NEGATIVE
+    number (e.g. -57.8). The classifier must use absolute magnitude,
+    otherwise the threshold check never fires for the real data shape."""
+    v, reason = cs.classify(_row(sharpe=1.82, return_pct=329.2, max_dd_pct=-57.8, trades=603))
     assert v == cs.DISCARD
     assert "liquid" in reason.lower() or "kill" in reason.lower()
+
+
+def test_classify_discard_liquidation_level_drawdown_positive_sign():
+    """Same threshold must fire when the source happens to store the
+    drawdown as a positive magnitude (legacy/test data shape)."""
+    v, _ = cs.classify(_row(sharpe=1.82, return_pct=329.2, max_dd_pct=57.8, trades=603))
+    assert v == cs.DISCARD
 
 
 def test_classify_max_dd_50_exact_boundary_is_tune_not_discard():
     """50.0% Max-DD is the strict cutoff (>50 triggers DISCARD). At 50
     exactly we should still see TUNE so the boundary behaviour is
-    deterministic and matches the docs."""
+    deterministic and matches the docs. Tested with both signs."""
+    v, _ = cs.classify(_row(sharpe=1.0, return_pct=20, max_dd_pct=-50.0, trades=100))
+    assert v == cs.TUNE
     v, _ = cs.classify(_row(sharpe=1.0, return_pct=20, max_dd_pct=50.0, trades=100))
+    assert v == cs.TUNE
+
+
+def test_classify_tune_high_drawdown_handles_negative_sign():
+    """The TUNE rule (Max-DD > 30 with positive Sharpe) must also use
+    abs() — covers the hl-momentum-btc real case (Max-DD -36.6%)."""
+    v, _ = cs.classify(_row(sharpe=0.58, return_pct=42.6, max_dd_pct=-36.6, trades=25))
+    # 25 trades < 30 so this fires the small-sample TUNE branch even
+    # before max_dd does — but BOTH branches need abs() correctness.
+    assert v == cs.TUNE
+    # Now isolate the max_dd branch with enough trades + sharpe >= 0.5
+    # so only the DD rule can flag it.
+    v, _ = cs.classify(_row(sharpe=0.8, return_pct=25, max_dd_pct=-45, trades=100))
     assert v == cs.TUNE
 
 

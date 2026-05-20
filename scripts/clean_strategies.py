@@ -111,7 +111,12 @@ def classify(row: dict, strategy_arg_symbol: str = "") -> Tuple[str, str]:
 
     sharpe = float(row.get("sharpe") or 0)
     ret = float(row.get("return_pct") or 0)
-    max_dd = float(row.get("max_dd_pct") or 0)
+    # The backtester stores max_drawdown_pct as a NEGATIVE number (e.g.
+    # -57.8 for a 57.8% drawdown). Use the absolute magnitude in all
+    # threshold checks so the rule reads cleanly regardless of sign
+    # convention. We carry it as `max_dd_abs` to avoid accidentally
+    # comparing the signed value somewhere in the body.
+    max_dd_abs = abs(float(row.get("max_dd_pct") or 0))
     trades = int(row.get("trades") or 0)
 
     # Hard failures first — they trump everything else (a strategy with
@@ -129,7 +134,7 @@ def classify(row: dict, strategy_arg_symbol: str = "") -> Tuple[str, str]:
             f"Sharpe {sharpe:.2f} negative over {trades} trades — "
             f"confirmed losing edge"
         )
-    if max_dd > 50.0:
+    if max_dd_abs > 50.0:
         # A 50%+ drawdown means the realised equity path crossed below
         # half the starting capital. In live trading the position(s) on
         # the way down would either have been liquidated (perps) or
@@ -137,7 +142,7 @@ def classify(row: dict, strategy_arg_symbol: str = "") -> Tuple[str, str]:
         # (PortfolioRiskConfig.max_drawdown_pct defaults to 25%, see
         # scheduler/config.go). DISCARD regardless of headline Sharpe.
         return DISCARD, (
-            f"Max-DD {max_dd:.1f}% — strategy would have been "
+            f"Max-DD {max_dd_abs:.1f}% — strategy would have been "
             f"liquidated / kill-switched in live trading"
         )
 
@@ -151,15 +156,15 @@ def classify(row: dict, strategy_arg_symbol: str = "") -> Tuple[str, str]:
     # Marginal band — has signal but not battle-tested.
     if 0.0 <= sharpe < 0.5:
         return TUNE, f"Sharpe {sharpe:.2f} marginal, needs tuning"
-    if max_dd > 30.0 and sharpe >= 0:
-        return TUNE, f"Max-DD {max_dd:.1f}% too high (Sharpe {sharpe:.2f})"
+    if max_dd_abs > 30.0 and sharpe >= 0:
+        return TUNE, f"Max-DD {max_dd_abs:.1f}% too high (Sharpe {sharpe:.2f})"
     if trades < 30 and sharpe >= 0:
         return TUNE, f"only {trades} trades — statistically inconclusive"
 
     # Anything left should be a healthy strategy.
-    if sharpe >= 0.5 and ret > 0 and max_dd <= 30 and trades >= 30:
+    if sharpe >= 0.5 and ret > 0 and max_dd_abs <= 30 and trades >= 30:
         return KEEP, (
-            f"Sharpe {sharpe:.2f}, return {ret:+.1f}%, Max-DD {max_dd:.1f}%, "
+            f"Sharpe {sharpe:.2f}, return {ret:+.1f}%, Max-DD {max_dd_abs:.1f}%, "
             f"{trades} trades"
         )
 
