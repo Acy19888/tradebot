@@ -49,6 +49,42 @@ def test_classify_discard_significantly_negative_sharpe():
     assert v == cs.DISCARD
 
 
+def test_classify_discard_confirmed_negative_edge():
+    """hl-amd-btc real case: Sharpe -0.21, Return -27.9% (above -30% so
+    not 'catastrophic'), 136 trades. Sample is big enough that the
+    negative Sharpe isn't noise — confirmed losing edge → DISCARD."""
+    v, reason = cs.classify(_row(sharpe=-0.21, return_pct=-27.9, max_dd_pct=46.9, trades=136))
+    assert v == cs.DISCARD
+    assert "confirmed" in reason.lower() or "negative" in reason.lower()
+
+
+def test_classify_discard_negative_sharpe_small_sample_is_only_tune_or_untested():
+    """Sub-50 trades with a slightly negative Sharpe is NOT enough sample
+    to call it broken — falls into the marginal band, not DISCARD."""
+    v, _ = cs.classify(_row(sharpe=-0.3, return_pct=-5, max_dd_pct=20, trades=30))
+    # Sharpe < -0.5 doesn't trigger (-0.3 > -0.5); trades < 50 so the new
+    # 'confirmed negative edge' rule doesn't fire either. Should fall
+    # through to the ambiguous-result TUNE fallback.
+    assert v == cs.TUNE
+
+
+def test_classify_discard_liquidation_level_drawdown():
+    """hl-range-hype-5m real case: Sharpe 1.82, +329% return, but
+    Max-DD -57.8% — the position would have been liquidated. DISCARD
+    regardless of headline Sharpe."""
+    v, reason = cs.classify(_row(sharpe=1.82, return_pct=329.2, max_dd_pct=57.8, trades=603))
+    assert v == cs.DISCARD
+    assert "liquid" in reason.lower() or "kill" in reason.lower()
+
+
+def test_classify_max_dd_50_exact_boundary_is_tune_not_discard():
+    """50.0% Max-DD is the strict cutoff (>50 triggers DISCARD). At 50
+    exactly we should still see TUNE so the boundary behaviour is
+    deterministic and matches the docs."""
+    v, _ = cs.classify(_row(sharpe=1.0, return_pct=20, max_dd_pct=50.0, trades=100))
+    assert v == cs.TUNE
+
+
 def test_classify_suspicious_too_high_sharpe():
     v, reason = cs.classify(_row(sharpe=5.98, return_pct=68557.0, max_dd_pct=27.1, trades=1179))
     assert v == cs.SUSPICIOUS

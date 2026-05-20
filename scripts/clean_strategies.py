@@ -23,7 +23,11 @@ script defers to the operator):
 
   DISCARD     — catastrophic, must NOT trade
                 * total_return_pct <= -30.0  OR
-                * sharpe < -0.5
+                * sharpe < -0.5  OR
+                * sharpe < 0 AND trades >= 50  (confirmed negative edge
+                  — statistically significant losing strategy)  OR
+                * max_drawdown_pct > 50  (would have been liquidated
+                  in live trading regardless of headline Sharpe)
   SUSPICIOUS  — looks too good to be true (lookahead bias / curve-fit
                 / data anomaly); needs manual review
                 * sharpe >= 3.0
@@ -110,11 +114,32 @@ def classify(row: dict, strategy_arg_symbol: str = "") -> Tuple[str, str]:
     max_dd = float(row.get("max_dd_pct") or 0)
     trades = int(row.get("trades") or 0)
 
-    # Hard failures first — they trump everything.
+    # Hard failures first — they trump everything else (a strategy with
+    # both a "winning" Sharpe and a liquidation-level DD is still DISCARD,
+    # because the equity curve would have crossed zero in live trading).
     if ret <= -30.0:
         return DISCARD, f"return {ret:+.1f}% catastrophic loss"
     if sharpe < -0.5:
         return DISCARD, f"Sharpe {sharpe:.2f} significantly negative ({trades} trades)"
+    if sharpe < 0 and trades >= 50:
+        # Statistically-significant negative edge — not random underperformance.
+        # 50 trades is the rough sample-size floor below which a negative
+        # Sharpe could plausibly be noise.
+        return DISCARD, (
+            f"Sharpe {sharpe:.2f} negative over {trades} trades — "
+            f"confirmed losing edge"
+        )
+    if max_dd > 50.0:
+        # A 50%+ drawdown means the realised equity path crossed below
+        # half the starting capital. In live trading the position(s) on
+        # the way down would either have been liquidated (perps) or
+        # would have triggered the portfolio kill switch
+        # (PortfolioRiskConfig.max_drawdown_pct defaults to 25%, see
+        # scheduler/config.go). DISCARD regardless of headline Sharpe.
+        return DISCARD, (
+            f"Max-DD {max_dd:.1f}% — strategy would have been "
+            f"liquidated / kill-switched in live trading"
+        )
 
     # Too-good-to-be-true band — flag for human review, do NOT auto-keep.
     if sharpe >= 3.0:
