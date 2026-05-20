@@ -106,7 +106,16 @@ def test_derive_kwargs_platform_inference_from_script():
     assert kw["platform"] == "okx"
 
 
-def test_run_one_skips_equities_without_calling_framework():
+def test_run_one_routes_equities_to_equity_backtest(monkeypatch):
+    """Phase 7c — equities used to be skipped wholesale; now they route
+    through run_equity_backtest. We mock that out so the unit test
+    doesn't actually hit yfinance, and we verify the dispatch occurred."""
+    calls = {}
+    def fake(sc, since):
+        calls["sc"] = sc
+        calls["since"] = since
+        return None  # simulate no data → skip with the new reason
+    monkeypatch.setattr(bp, "run_equity_backtest", fake)
     sc = {
         "id": "rh-msft-skip",
         "type": "spot",
@@ -119,7 +128,55 @@ def test_run_one_skips_equities_without_calling_framework():
     sid, result, reason = bp.run_one(sc, "2024-01-01")
     assert sid == "rh-msft-skip"
     assert result is None
-    assert "MSFT" in reason
+    # New behaviour: the skip reason now reflects yfinance data
+    # availability, not the old "not in backtest data path" wording.
+    assert "yfinance" in reason.lower() or "no data" in reason.lower()
+    assert calls["sc"]["id"] == "rh-msft-skip"
+    assert calls["since"] == "2024-01-01"
+
+
+def test_run_one_returns_equity_backtest_success(monkeypatch):
+    """When the equity adapter returns a real result dict, run_one
+    propagates it unchanged."""
+    fake_result = {
+        "strategy_name": "momentum",
+        "symbol": "AAPL",
+        "timeframe": "5m",
+        "sharpe_ratio": 0.4,
+        "total_return_pct": 3.2,
+        "max_drawdown_pct": -8.0,
+        "total_trades": 41,
+    }
+    monkeypatch.setattr(bp, "run_equity_backtest", lambda sc, since: fake_result)
+    sc = {
+        "id": "rh-aapl",
+        "args": ["momentum", "AAPL", "5m"],
+        "open_strategy": {"name": "momentum"},
+        "capital": 100,
+    }
+    sid, result, reason = bp.run_one(sc, "2024-01-01")
+    assert reason is None
+    assert result is fake_result
+    assert sid == "rh-aapl"
+
+
+def test_run_one_propagates_equity_backtest_exception(monkeypatch):
+    """An exception inside run_equity_backtest must NOT bubble up to
+    abort the whole portfolio run — it becomes a skip with a structured
+    reason instead."""
+    def boom(sc, since):
+        raise RuntimeError("yfinance rate limit")
+    monkeypatch.setattr(bp, "run_equity_backtest", boom)
+    sc = {
+        "id": "rh-aapl",
+        "args": ["momentum", "AAPL", "5m"],
+        "open_strategy": {"name": "momentum"},
+        "capital": 100,
+    }
+    sid, result, reason = bp.run_one(sc, "2024-01-01")
+    assert result is None
+    assert "RuntimeError" in reason
+    assert "rate limit" in reason
 
 
 def test_metric_handles_missing_and_none():

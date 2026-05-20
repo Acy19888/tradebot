@@ -66,6 +66,9 @@ os.chdir(_REPO_ROOT)
 from run_backtest import run_single_backtest  # noqa: E402
 from reporter import format_single_report  # noqa: E402
 
+# Phase 7c — equity adapter. Imported lazily inside run_equity_backtest
+# so the crypto-only paths don't pay the yfinance import cost.
+
 # Equity tickers (Robinhood) — flagged as not-yet-supported by the
 # crypto-only data_fetcher. We surface them in the report rather than
 # attempting and getting a misleading "no data" entry per strategy.
@@ -169,7 +172,14 @@ def run_one(sc: dict, since: str) -> Tuple[str, Optional[dict], Optional[str]]:
     sid = sc.get("id") or "unknown"
     raw_symbol = (sc.get("args") or [None, ""])[1].upper()
     if raw_symbol in EQUITY_TICKERS:
-        return sid, None, f"equity ticker {raw_symbol} not in backtest data path"
+        # Phase 7c — equities now have a real data path via yfinance.
+        try:
+            result = run_equity_backtest(sc, since)
+        except Exception as exc:
+            return sid, None, f"equity backtest raised: {exc.__class__.__name__}: {exc}"
+        if not result:
+            return sid, None, "equity backtest returned None (no data from yfinance)"
+        return sid, result, None
 
     kw = derive_backtest_kwargs(sc, since)
     if not kw:
@@ -182,6 +192,79 @@ def run_one(sc: dict, since: str) -> Tuple[str, Optional[dict], Optional[str]]:
     if not result:
         return sid, None, "backtest returned None (likely no data)"
     return sid, result, None
+
+
+def run_equity_backtest(sc: dict, since: str) -> Optional[dict]:
+    """Backtest a Robinhood equity strategy via yfinance data.
+
+    Mirrors what run_single_backtest does for crypto (load OHLCV →
+    apply_strategy → Backtester.run → return metrics dict) but routes
+    the data load through shared_tools.equity_data_fetcher instead of
+    the binanceus CCXT cache. Returns the same result-dict shape so
+    reporter.format_single_report and the rest of backtest_portfolio
+    treat equity strategies symmetrically with crypto ones.
+
+    Strategy registry is "spot" (Robinhood equities trade as spot in
+    the existing taxonomy); platform is "robinhood" so the
+    CalculatePlatformSpotFee model picks the 0% / PFOF fee schedule.
+
+    yfinance intraday history caps (5m → 60 days, 1h → 730 days) are
+    documented in equity_data_fetcher; this function does not clip
+    ``since`` — yfinance silently truncates and the report's period
+    field reflects what was actually returned.
+    """
+    from registry_loader import load_registry
+    from backtester import Backtester
+    from atr import ensure_atr_indicator
+    from equity_data_fetcher import load_equity_ohlcv
+
+    args = sc.get("args") or []
+    if len(args) < 3:
+        return None
+    open_ref = sc.get("open_strategy") or {}
+    strategy_name = open_ref.get("name") or args[0]
+    ticker = args[1]
+    timeframe = args[2]
+    params = dict(open_ref.get("params") or {})
+    capital = float(sc.get("capital") or 100)
+
+    reg = load_registry("spot")
+    strat = reg.STRATEGY_REGISTRY.get(strategy_name)
+    if not strat:
+        print(f"[equity] unknown strategy '{strategy_name}' in spot registry", file=sys.stderr)
+        return None
+
+    df = load_equity_ohlcv(ticker, timeframe=timeframe, start_date=since)
+    if df.empty:
+        return None
+
+    strat_params = params or strat.get("default_params", {})
+    df_signals = reg.apply_strategy(strategy_name, df, strat_params)
+    # Same ATR injection pattern as run_single_backtest: close evaluators
+    # like tiered_tp_atr need an `atr` column; the open strategy may not
+    # emit one.
+    df_signals = ensure_atr_indicator(df_signals)
+
+    bt = Backtester(
+        initial_capital=capital,
+        platform="robinhood",
+        open_strategy={"name": strategy_name, "params": dict(strat_params)},
+        close_strategies=None,
+        regime_enabled=False,
+        stop_loss_atr_mult=sc.get("stop_loss_atr_mult"),
+        stop_loss_pct=sc.get("stop_loss_pct"),
+        trailing_stop_atr_mult=sc.get("trailing_stop_atr_mult"),
+        trailing_stop_pct=sc.get("trailing_stop_pct"),
+        strategy_type="spot",
+    )
+    results = bt.run(
+        df_signals,
+        strategy_name=strategy_name,
+        symbol=ticker,
+        timeframe=timeframe,
+        params=strat_params,
+    )
+    return results
 
 
 def metric(r: dict, key: str, default=0):
