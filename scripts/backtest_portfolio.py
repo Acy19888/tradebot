@@ -135,10 +135,26 @@ def derive_backtest_kwargs(sc: dict, since: str) -> Optional[Dict[str, Any]]:
     strat_name = open_ref.get("name") or args[0]
     params = dict(open_ref.get("params") or {})
 
-    # Registry selection: futures strategies live in their own registry;
-    # everything else (spot + perps) shares the open registry which is
-    # internally labelled "spot".
-    registry = "futures" if strategy_type == "futures" else "spot"
+    # Registry selection — MUST match what the live script does, otherwise
+    # backtest validates against a different strategy set than runs in prod.
+    #
+    # check_hyperliquid.py:  sys.path insert .../shared_strategies/open/futures
+    # check_okx.py (swap):   sys.path insert .../shared_strategies/open/futures
+    # check_okx.py (spot):   sys.path insert .../shared_strategies/open/spot
+    # check_robinhood.py:    sys.path insert .../shared_strategies/open/spot
+    #
+    # So: perps + futures → futures registry; only true spot markets → spot.
+    # The previous mapping (perps → spot) silently lost futures-only
+    # strategies like tema_cross_bd and triple_ema_bidir — the backtester
+    # returned None for them and we wrote them off as "no data" when really
+    # they were just absent from the wrong registry. Phase 7d fix.
+    if strategy_type == "spot":
+        registry = "spot"
+    else:
+        # perps, futures, options — all use the futures-side registry in
+        # production; the futures registry is a superset that includes
+        # bidirectional strategies (tema_cross_bd, triple_ema_bidir, ...).
+        registry = "futures"
 
     capital = float(sc.get("capital") or 1000)
 

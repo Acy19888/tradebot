@@ -50,9 +50,68 @@ def test_derive_kwargs_hyperliquid_perps():
     assert kw["timeframe"] == "1h"
     assert kw["capital"] == 1000
     assert kw["platform"] == "hyperliquid"
-    assert kw["registry"] == "spot"
+    # Phase 7d: perps now resolves to the futures registry — same registry
+    # check_hyperliquid.py loads in production. Previously this asserted
+    # "spot" which silently lost futures-only strategies like tema_cross_bd.
+    assert kw["registry"] == "futures"
     assert kw["params"] == {"roc_period": 12}
     assert kw["since"] == "2023-01-01"
+
+
+def test_derive_kwargs_hyperliquid_perps_futures_only_strategy():
+    """Phase 7d regression: tema_cross_bd is registered with
+    platforms=("futures",) only — under the pre-fix mapping (perps→spot)
+    it was invisible to the backtester. The fix means HL perps strategies
+    now resolve to the futures registry where tema_cross_bd lives."""
+    sc = {
+        "id": "hl-ht-tema-btc-1m-both",
+        "type": "perps",
+        "script": "shared_scripts/check_hyperliquid.py",
+        "args": ["tema_cross_bd", "BTC", "1m"],
+        "open_strategy": {"name": "tema_cross_bd"},
+        "capital": 10000,
+    }
+    kw = bp.derive_backtest_kwargs(sc, "2024-01-01")
+    assert kw is not None
+    assert kw["platform"] == "hyperliquid"
+    assert kw["registry"] == "futures", (
+        "HL perps strategies MUST resolve to the futures registry — "
+        "the live script (check_hyperliquid.py) loads "
+        "shared_strategies/open/futures so the backtest needs to match"
+    )
+
+
+def test_derive_kwargs_okx_perps_routes_to_futures_registry():
+    """Same regression for OKX perps (swap inst-type loads futures
+    registry in check_okx.py)."""
+    sc = {
+        "id": "okx-momentum-eth",
+        "type": "perps",
+        "script": "shared_scripts/check_okx.py",
+        "args": ["momentum", "ETH", "1h"],
+        "open_strategy": {"name": "momentum"},
+        "capital": 500,
+    }
+    kw = bp.derive_backtest_kwargs(sc, "2024-01-01")
+    assert kw is not None
+    assert kw["platform"] == "okx"
+    assert kw["registry"] == "futures"
+
+
+def test_derive_kwargs_explicit_futures_type_routes_to_futures():
+    """Futures-typed strategies always go to the futures registry —
+    unchanged from pre-fix behaviour."""
+    sc = {
+        "id": "futures-x",
+        "type": "futures",
+        "script": "shared_scripts/check_okx.py",
+        "args": ["momentum", "BTC", "1h"],
+        "open_strategy": {"name": "momentum"},
+        "capital": 500,
+    }
+    kw = bp.derive_backtest_kwargs(sc, "2024-01-01")
+    assert kw is not None
+    assert kw["registry"] == "futures"
 
 
 def test_derive_kwargs_robinhood_equity_returns_none():
