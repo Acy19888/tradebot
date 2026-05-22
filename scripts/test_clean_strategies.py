@@ -269,19 +269,20 @@ def test_render_report_applied_mode_hides_apply_block():
 
 
 def test_render_report_suspend_mode_uses_softer_wording():
-    """Suspend-mode renders must use 'set active: false' wording, NOT
-    'REMOVED' — otherwise an operator reading the report thinks their
-    strategies are gone when they're actually just paused."""
+    """Suspend-mode renders must mention `_disabled_strategies` (the
+    orphan key we move things into), NOT 'REMOVED' — otherwise an
+    operator reading the report thinks their strategies are gone when
+    they're actually just parked."""
     decisions = [
         {"id": "loss", "verdict": cs.DISCARD, "reason": "catastrophic",
          "summary": {"sharpe": -9, "return_pct": -100, "max_dd_pct": -100, "trades": 7000}},
     ]
     out = cs.render_markdown_report(
         decisions, "scheduler/config.json", "x.json",
-        mode_label="APPLIED (suspend — active=false in place)",
+        mode_label="APPLIED (suspend — moved to _disabled_strategies)",
     )
     # The suspend wording must appear in the summary AND in the section title.
-    assert "active: false" in out
+    assert "_disabled_strategies" in out
     # And the hard-delete wording must NOT appear (operator confusion).
     assert "REMOVED" not in out
 
@@ -365,14 +366,21 @@ def test_main_apply_writes_backup_and_overwrites(tmp_path, monkeypatch):
 # Suspend mode — cleanup_config(mode="suspend")
 # --------------------------------------------------------------------
 
-def test_cleanup_suspend_keeps_discards_with_active_false():
-    """In suspend mode, DISCARD entries stay in the strategies list but
-    must be marked active=false with audit metadata (timestamp + reason).
-    This is the reversible alternative to --apply."""
+def test_cleanup_suspend_lifts_discards_into_disabled_block():
+    """In suspend mode, DISCARD entries are moved OUT of strategies[]
+    into the top-level orphan _disabled_strategies[]. The wrapper carries
+    audit metadata (disabled_at + reason) but the inner `config` is the
+    original StrategyConfig — never mutated, so the Go-side validator
+    (#704) never sees a tampered shape on next reload.
+
+    Why not active=false in-place: the Go scheduler rejects unknown
+    fields inside strategies[] entries (see scheduler/config_unknown_keys.go),
+    so any added `active` / `_suspended_*` field would break reload."""
+    original_bad = {"id": "bad", "args": ["momentum", "ETH", "5m"], "capital": 100}
     cfg = {
         "strategies": [
-            {"id": "good", "args": ["momentum", "BTC", "1h"], "active": True},
-            {"id": "bad",  "args": ["momentum", "ETH", "5m"], "active": True},
+            {"id": "good", "args": ["momentum", "BTC", "1h"]},
+            original_bad,
         ],
     }
     summary = [
@@ -380,39 +388,89 @@ def test_cleanup_suspend_keeps_discards_with_active_false():
         {"id": "bad",  "status": "ok", "sharpe": -9.0, "return_pct": -100, "max_dd_pct": 100, "trades": 7000},
     ]
     new_cfg, decisions = cs.cleanup_config(cfg, summary, mode="suspend")
+
+    # 'bad' is gone from strategies[] — that's how the Go scheduler stops loading it.
     ids = [s["id"] for s in new_cfg["strategies"]]
-    # 'bad' is NOT removed — must still be present, just disabled.
-    assert ids == ["good", "bad"]
-    bad = next(s for s in new_cfg["strategies"] if s["id"] == "bad")
-    assert bad["active"] is False
-    assert "_suspended_at" in bad
-    assert "_suspended_reason" in bad
-    # Reason should match the classifier's verdict reason.
-    assert "catastrophic" in bad["_suspended_reason"] or "Sharpe" in bad["_suspended_reason"]
-    # 'good' must NOT be touched — no active flag added unless original had one.
-    good = next(s for s in new_cfg["strategies"] if s["id"] == "good")
-    assert good.get("active", True) is True
-    assert "_suspended_at" not in good
-    # Decisions list still reflects DISCARD verdict — the verdict is independent
-    # of how we acted on it.
+    assert ids == ["good"]
+    # 'bad' lives in the disabled block, wrapped with metadata.
+    disabled = new_cfg.get("_disabled_strategies") or []
+    assert len(disabled) == 1
+    entry = disabled[0]
+    assert entry["id"] == "bad"
+    assert "disabled_at" in entry
+    assert "reason" in entry
+    assert ("catastrophic" in entry["reason"]) or ("Sharpe" in entry["reason"])
+    # The inner config must be the ORIGINAL strategy (verbatim, no
+    # added fields that would trip the Go validator).
+    assert entry["config"] == original_bad
+    assert "active" not in entry["config"]
+    assert "_suspended_at" not in entry["config"]
+    # Decisions list still reflects DISCARD verdict.
     bad_decision = next(d for d in decisions if d["id"] == "bad")
     assert bad_decision["verdict"] == cs.DISCARD
 
 
 def test_cleanup_suspend_does_not_mutate_input_strategy_dict():
-    """Suspend must create a NEW dict for the suspended strategy, not
-    mutate the caller's. Important so the test suite + the renderer can
-    still introspect the original strategy fixture afterwards."""
-    original_bad = {"id": "bad", "args": ["momentum", "ETH", "5m"], "active": True}
+    """Suspend must NEVER write to the original strategy dict — adding
+    even a single field would break the Go validator on next reload."""
+    original_bad = {"id": "bad", "args": ["momentum", "ETH", "5m"]}
     cfg = {"strategies": [original_bad]}
     summary = [
         {"id": "bad", "status": "ok", "sharpe": -9.0, "return_pct": -100,
          "max_dd_pct": 100, "trades": 7000},
     ]
     cs.cleanup_config(cfg, summary, mode="suspend")
-    # The original dict must not have been mutated.
-    assert original_bad["active"] is True
+    # No mutation — the dict still has exactly the original keys.
+    assert set(original_bad.keys()) == {"id", "args"}
+    assert "active" not in original_bad
     assert "_suspended_at" not in original_bad
+
+
+def test_cleanup_suspend_merges_with_existing_disabled_block():
+    """Running --suspend twice over different backtests should accumulate
+    the disabled block (audit history), not clobber it."""
+    cfg = {
+        "strategies": [
+            {"id": "bad-new", "args": ["momentum", "ETH", "5m"]},
+        ],
+        "_disabled_strategies": [
+            {"id": "bad-old", "disabled_at": "2026-01-01T00:00:00",
+             "reason": "old run", "config": {"id": "bad-old", "args": ["x"]}},
+        ],
+    }
+    summary = [
+        {"id": "bad-new", "status": "ok", "sharpe": -9.0, "return_pct": -100,
+         "max_dd_pct": 100, "trades": 7000},
+    ]
+    new_cfg, _ = cs.cleanup_config(cfg, summary, mode="suspend")
+    ids_disabled = [d["id"] for d in new_cfg["_disabled_strategies"]]
+    assert "bad-old" in ids_disabled
+    assert "bad-new" in ids_disabled
+    assert len(ids_disabled) == 2
+
+
+def test_cleanup_suspend_idempotent_on_already_disabled():
+    """If the operator re-runs --suspend with the same backtest summary
+    (or after a config restore loop), the same id shouldn't appear in
+    _disabled_strategies twice. (Defensive — a normal second run can't
+    classify it as DISCARD anyway because it's no longer in strategies[]
+    — but the merger guards against future paths that could.)"""
+    cfg = {
+        "strategies": [
+            {"id": "bad", "args": ["x", "ETH", "5m"]},
+        ],
+        "_disabled_strategies": [
+            {"id": "bad", "disabled_at": "2026-01-01T00:00:00",
+             "reason": "previous run", "config": {"id": "bad", "args": ["x"]}},
+        ],
+    }
+    summary = [
+        {"id": "bad", "status": "ok", "sharpe": -9.0, "return_pct": -100,
+         "max_dd_pct": 100, "trades": 7000},
+    ]
+    new_cfg, _ = cs.cleanup_config(cfg, summary, mode="suspend")
+    ids_disabled = [d["id"] for d in new_cfg["_disabled_strategies"]]
+    assert ids_disabled == ["bad"]  # no duplicates
 
 
 def test_cleanup_suspend_suspicious_still_moves_to_orphan_block():
@@ -438,13 +496,14 @@ def test_cleanup_invalid_mode_raises():
         cs.cleanup_config({"strategies": []}, [], mode="delete-everything")
 
 
-def test_main_suspend_writes_backup_and_marks_inactive(tmp_path, monkeypatch, capsys):
-    """End-to-end suspend run: backup exists, live config still contains
-    the DISCARD strategy but with active=false."""
+def test_main_suspend_writes_backup_and_lifts_to_disabled_block(tmp_path, monkeypatch, capsys):
+    """End-to-end suspend run: backup exists, live config now has 'bad'
+    moved out of strategies[] into _disabled_strategies[] — Go validator
+    safe because no unknown fields were added to the inner strategy."""
     cfg = {
         "strategies": [
-            {"id": "good", "args": ["momentum", "BTC", "1h"], "active": True},
-            {"id": "bad",  "args": ["momentum", "ETH", "5m"], "active": True},
+            {"id": "good", "args": ["momentum", "BTC", "1h"]},
+            {"id": "bad",  "args": ["momentum", "ETH", "5m"]},
         ],
     }
     summary = [
@@ -466,17 +525,23 @@ def test_main_suspend_writes_backup_and_marks_inactive(tmp_path, monkeypatch, ca
     rc = cs.main()
     assert rc == 0
     cleaned = json.loads(cfg_path.read_text())
-    # Both still present.
-    assert [s["id"] for s in cleaned["strategies"]] == ["good", "bad"]
-    bad = next(s for s in cleaned["strategies"] if s["id"] == "bad")
-    assert bad["active"] is False
-    assert "_suspended_at" in bad
-    # Backup file exists with original active=True for 'bad'.
+    # 'bad' is LIFTED OUT of strategies[].
+    assert [s["id"] for s in cleaned["strategies"]] == ["good"]
+    # 'bad' lives in _disabled_strategies[], wrapped with metadata.
+    disabled = cleaned.get("_disabled_strategies") or []
+    assert len(disabled) == 1
+    assert disabled[0]["id"] == "bad"
+    assert "disabled_at" in disabled[0]
+    assert "reason" in disabled[0]
+    # Inner config must have ONLY the original keys — no `active`,
+    # no `_suspended_at` (those would trip Go's #704 validator).
+    inner = disabled[0]["config"]
+    assert set(inner.keys()) == {"id", "args"}
+    # Backup file has the original strategies[] intact.
     backups = list(tmp_path.glob("config.json.bak.*"))
     assert len(backups) == 1
     backed_up = json.loads(backups[0].read_text())
-    backed_bad = next(s for s in backed_up["strategies"] if s["id"] == "bad")
-    assert backed_bad["active"] is True
+    assert [s["id"] for s in backed_up["strategies"]] == ["good", "bad"]
     # Console output mentions SUSPENDED, not APPLIED-hard-delete.
     out = capsys.readouterr().out
     assert "SUSPENDED" in out

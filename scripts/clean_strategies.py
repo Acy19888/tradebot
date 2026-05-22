@@ -17,11 +17,19 @@ Default mode is dry-run — prints what WOULD happen and writes the report
 but does NOT touch the original config. Three apply modes:
 
   --apply      Hard delete DISCARD strategies (irreversible without git/backup)
-  --suspend    Soft remove: set active=false on DISCARD strategies, keep them
-               in `strategies` array with a `_suspended_at` timestamp and
-               `_suspended_reason` field. The scheduler skips active=false
-               entries on load, but they remain visible in the dashboard and
-               trivially restorable (flip the bool back).
+  --suspend    Soft remove: lift DISCARD strategies OUT of the `strategies`
+               array and into a top-level orphan key `_disabled_strategies`
+               with audit metadata wrapped around the original config. The
+               Go scheduler:
+                 - reads `strategies[]` only — so a moved entry stops trading
+                 - rejects unknown keys *inside* a strategies[] entry via
+                   validateStrategyJSONKeys (#704) — so we MUST NOT add
+                   `active`/`_suspended_at` fields to the StrategyConfig
+                   shape; they'd fail the validator on next reload
+                 - ignores any top-level key it doesn't know — so
+                   `_disabled_strategies` is invisible to the live bot
+               That's why metadata lives in a wrapper around the strategy,
+               not on the strategy itself.
   (none)       Dry-run — write a report, no mutations.
 
 In all three cases the live config is backed up to
@@ -31,8 +39,8 @@ In all three cases the live config is backed up to
 fresh backtest — it preserves audit history (when was a strategy paused
 and why) and lets you A/B compare against the unfiltered Bot-A. Once
 Paper-Live confirms the verdict over a few weeks, you can either flip
-back to `--apply` (hard delete) or just leave the suspended block in
-place as a permanent record.
+back to `--apply` (hard delete) or restore by moving entries from
+`_disabled_strategies[].config` back into `strategies[]`.
 
 Classification (top-trader thresholds, conservative — when in doubt the
 script defers to the operator):
@@ -62,10 +70,11 @@ script defers to the operator):
 Cleanup action per class (depends on mode):
 
   DISCARD     → --apply:   removed from `strategies` list
-                --suspend: active=false in place, with _suspended_at +
-                           _suspended_reason metadata
-  SUSPICIOUS  → both modes: moved to `_suspended_strategies` (kept in
-                file but scheduler doesn't load that key)
+                --suspend: moved to top-level `_disabled_strategies[]`
+                           wrapped as {id, disabled_at, reason, config: …}
+                           — original StrategyConfig shape unchanged
+  SUSPICIOUS  → both modes: moved to top-level `_suspended_strategies[]`
+                (kept verbatim — orphan key the scheduler ignores)
   TUNE        → kept in `strategies` list, flagged in report
   KEEP        → kept
   EQUITY      → kept
@@ -218,15 +227,18 @@ def cleanup_config(cfg: dict, summary_rows: List[dict], mode: str = "apply") -> 
 
     `mode` controls how DISCARD strategies are handled:
       "apply"   — hard delete from `strategies`
-      "suspend" — soft remove: set active=false in place, add metadata
-                  fields `_suspended_at` (ISO timestamp) and
-                  `_suspended_reason` (the classification reason). The
-                  Go scheduler treats `active: false` as "do not load",
-                  so the strategy is operationally dead but stays in
-                  the file for audit/restore.
+      "suspend" — move out of `strategies` and into top-level
+                  `_disabled_strategies[]`. Each entry is a wrapper:
+                    {"id": <strategy-id>,
+                     "disabled_at": <ISO timestamp>,
+                     "reason": <classification reason>,
+                     "config": <original StrategyConfig dict, unchanged>}
+                  The Go validator (#704) only scans `strategies[]`, so a
+                  wrapper at the top level is safe even though the inner
+                  `config` carries the verbatim StrategyConfig shape.
 
-    SUSPICIOUS strategies are always moved to `_suspended_strategies`
-    (orthogonal key the scheduler doesn't read) — that behaviour is
+    SUSPICIOUS strategies are always moved verbatim to
+    `_suspended_strategies` (orthogonal orphan key) — that behaviour is
     independent of `mode` because a suspicious result requires manual
     review either way.
 
@@ -239,8 +251,9 @@ def cleanup_config(cfg: dict, summary_rows: List[dict], mode: str = "apply") -> 
     by_id = summary_lookup(summary_rows)
     keep: List[dict] = []
     suspicious_block: List[dict] = []
+    disabled_block: List[dict] = []
     decisions: List[dict] = []
-    suspended_ts = datetime.now().isoformat(timespec="seconds")
+    disabled_ts = datetime.now().isoformat(timespec="seconds")
     for sc in cfg.get("strategies", []) or []:
         sid = sc.get("id") or "?"
         row = by_id.get(sid)
@@ -259,14 +272,17 @@ def cleanup_config(cfg: dict, summary_rows: List[dict], mode: str = "apply") -> 
             if mode == "apply":
                 # Hard delete — strategy disappears from the file.
                 continue
-            # mode == "suspend": keep the entry but disable + annotate.
-            # Copy to avoid mutating the caller's strategy dict in-place;
-            # this matters for the test suite which reuses input fixtures.
-            suspended_sc = dict(sc)
-            suspended_sc["active"] = False
-            suspended_sc["_suspended_at"] = suspended_ts
-            suspended_sc["_suspended_reason"] = reason
-            keep.append(suspended_sc)
+            # mode == "suspend": lift out of strategies[] into the orphan
+            # _disabled_strategies[] block. The inner `config` is the
+            # original StrategyConfig dict (not a copy): we never mutate
+            # it, so identity preservation is fine and tests that compare
+            # against the input fixture still pass.
+            disabled_block.append({
+                "id": sid,
+                "disabled_at": disabled_ts,
+                "reason": reason,
+                "config": sc,
+            })
             continue
         if verdict == SUSPICIOUS:
             suspicious_block.append(sc)
@@ -280,6 +296,23 @@ def cleanup_config(cfg: dict, summary_rows: List[dict], mode: str = "apply") -> 
     elif "_suspended_strategies" in new_cfg:
         # If the operator's previous cleanup left an empty key, prune it.
         del new_cfg["_suspended_strategies"]
+    if disabled_block:
+        # Merge with any previously-disabled entries instead of clobbering —
+        # an operator running clean_strategies twice over different backtests
+        # should accumulate audit history, not lose the older disable record.
+        existing_disabled = list(new_cfg.get("_disabled_strategies") or [])
+        existing_ids = {d.get("id") for d in existing_disabled if isinstance(d, dict)}
+        for entry in disabled_block:
+            # Skip if this id is already in the disabled block — re-running
+            # the cleanup shouldn't create duplicates. (The id-set check is
+            # defensive: a normal second run shouldn't even classify a
+            # already-disabled strategy as DISCARD because it's no longer
+            # in strategies[].)
+            if entry["id"] not in existing_ids:
+                existing_disabled.append(entry)
+        new_cfg["_disabled_strategies"] = existing_disabled
+    elif "_disabled_strategies" in new_cfg and not new_cfg["_disabled_strategies"]:
+        del new_cfg["_disabled_strategies"]
     return new_cfg, decisions
 
 
@@ -297,7 +330,7 @@ def render_markdown_report(decisions: List[dict], cfg_path: str, summary_path: s
 
     is_suspend_mode = "suspend" in mode_label.lower()
     discard_outcome = (
-        "set to `active: false` in-place (reversible)" if is_suspend_mode
+        "moved to `_disabled_strategies[]` (reversible)" if is_suspend_mode
         else "REMOVED from cleaned config"
     )
 
@@ -335,7 +368,7 @@ def render_markdown_report(decisions: List[dict], cfg_path: str, summary_path: s
     # One section per verdict so the operator can scan top-down.
     order = [DISCARD, SUSPICIOUS, TUNE, KEEP, UNTESTED, EQUITY]
     discard_section_title = (
-        "Discarded — set to `active: false` in-place (reversible)"
+        "Discarded — moved to `_disabled_strategies[]` (reversible)"
         if is_suspend_mode
         else "Discarded — REMOVED from cleaned config"
     )
@@ -431,7 +464,7 @@ def main() -> int:
     write_mode.add_argument("--apply", action="store_true",
                             help="hard-delete DISCARD strategies from the live config (with backup)")
     write_mode.add_argument("--suspend", action="store_true",
-                            help="soft-remove DISCARD strategies: set active=false in place (reversible)")
+                            help="soft-remove DISCARD strategies: move into top-level _disabled_strategies[] (reversible, no Go-binary change required)")
     parser.add_argument("--output-dir", default=None,
                         help="where to write the cleanup_report.md (default: alongside --summary)")
     args = parser.parse_args()
@@ -460,7 +493,7 @@ def main() -> int:
         mode_label = "APPLIED (hard delete)"
     elif args.suspend:
         mode = "suspend"
-        mode_label = "APPLIED (suspend — active=false in place)"
+        mode_label = "APPLIED (suspend — moved to _disabled_strategies)"
     else:
         mode = "apply"  # cleanup_config branches the same way for dry-run
         mode_label = "DRY-RUN (no files mutated)"
