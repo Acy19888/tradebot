@@ -9,6 +9,8 @@ import json
 import os
 import sys
 
+import pytest
+
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _SCRIPT_DIR)
 
@@ -246,19 +248,42 @@ def test_render_report_groups_by_verdict():
         {"id": "stock", "verdict": cs.EQUITY,   "reason": "equity",
          "summary": {"status": "skipped", "reason": "equity ticker AAPL..."}},
     ]
-    out = cs.render_markdown_report(decisions, "scheduler/config.json", "x/portfolio_summary.json", applied=False)
+    out = cs.render_markdown_report(
+        decisions, "scheduler/config.json", "x/portfolio_summary.json",
+        mode_label="DRY-RUN (no files mutated)",
+    )
     # Group order should put DISCARD before KEEP so operators see hazards first.
     assert out.index("Discarded") < out.index("Keep")
     assert "`win`" in out and "`loss`" in out and "`stock`" in out
     assert "DRY-RUN" in out
-    # "To apply" block only shows in dry-run mode.
+    # "To apply" block only shows in dry-run mode, and now lists both flags.
     assert "--apply" in out
+    assert "--suspend" in out
 
 
 def test_render_report_applied_mode_hides_apply_block():
-    out = cs.render_markdown_report([], "scheduler/config.json", "x.json", applied=True)
+    out = cs.render_markdown_report([], "scheduler/config.json", "x.json",
+                                    mode_label="APPLIED (hard delete)")
     assert "APPLIED" in out
     assert "## To apply" not in out
+
+
+def test_render_report_suspend_mode_uses_softer_wording():
+    """Suspend-mode renders must use 'set active: false' wording, NOT
+    'REMOVED' — otherwise an operator reading the report thinks their
+    strategies are gone when they're actually just paused."""
+    decisions = [
+        {"id": "loss", "verdict": cs.DISCARD, "reason": "catastrophic",
+         "summary": {"sharpe": -9, "return_pct": -100, "max_dd_pct": -100, "trades": 7000}},
+    ]
+    out = cs.render_markdown_report(
+        decisions, "scheduler/config.json", "x.json",
+        mode_label="APPLIED (suspend — active=false in place)",
+    )
+    # The suspend wording must appear in the summary AND in the section title.
+    assert "active: false" in out
+    # And the hard-delete wording must NOT appear (operator confusion).
+    assert "REMOVED" not in out
 
 
 # --------------------------------------------------------------------
@@ -334,3 +359,147 @@ def test_main_apply_writes_backup_and_overwrites(tmp_path, monkeypatch):
     assert len(backups) == 1
     backed_up = json.loads(backups[0].read_text())
     assert any(s["id"] == "bad" for s in backed_up["strategies"])
+
+
+# --------------------------------------------------------------------
+# Suspend mode — cleanup_config(mode="suspend")
+# --------------------------------------------------------------------
+
+def test_cleanup_suspend_keeps_discards_with_active_false():
+    """In suspend mode, DISCARD entries stay in the strategies list but
+    must be marked active=false with audit metadata (timestamp + reason).
+    This is the reversible alternative to --apply."""
+    cfg = {
+        "strategies": [
+            {"id": "good", "args": ["momentum", "BTC", "1h"], "active": True},
+            {"id": "bad",  "args": ["momentum", "ETH", "5m"], "active": True},
+        ],
+    }
+    summary = [
+        {"id": "good", "status": "ok", "sharpe": 1.2, "return_pct": 30, "max_dd_pct": 12, "trades": 80},
+        {"id": "bad",  "status": "ok", "sharpe": -9.0, "return_pct": -100, "max_dd_pct": 100, "trades": 7000},
+    ]
+    new_cfg, decisions = cs.cleanup_config(cfg, summary, mode="suspend")
+    ids = [s["id"] for s in new_cfg["strategies"]]
+    # 'bad' is NOT removed — must still be present, just disabled.
+    assert ids == ["good", "bad"]
+    bad = next(s for s in new_cfg["strategies"] if s["id"] == "bad")
+    assert bad["active"] is False
+    assert "_suspended_at" in bad
+    assert "_suspended_reason" in bad
+    # Reason should match the classifier's verdict reason.
+    assert "catastrophic" in bad["_suspended_reason"] or "Sharpe" in bad["_suspended_reason"]
+    # 'good' must NOT be touched — no active flag added unless original had one.
+    good = next(s for s in new_cfg["strategies"] if s["id"] == "good")
+    assert good.get("active", True) is True
+    assert "_suspended_at" not in good
+    # Decisions list still reflects DISCARD verdict — the verdict is independent
+    # of how we acted on it.
+    bad_decision = next(d for d in decisions if d["id"] == "bad")
+    assert bad_decision["verdict"] == cs.DISCARD
+
+
+def test_cleanup_suspend_does_not_mutate_input_strategy_dict():
+    """Suspend must create a NEW dict for the suspended strategy, not
+    mutate the caller's. Important so the test suite + the renderer can
+    still introspect the original strategy fixture afterwards."""
+    original_bad = {"id": "bad", "args": ["momentum", "ETH", "5m"], "active": True}
+    cfg = {"strategies": [original_bad]}
+    summary = [
+        {"id": "bad", "status": "ok", "sharpe": -9.0, "return_pct": -100,
+         "max_dd_pct": 100, "trades": 7000},
+    ]
+    cs.cleanup_config(cfg, summary, mode="suspend")
+    # The original dict must not have been mutated.
+    assert original_bad["active"] is True
+    assert "_suspended_at" not in original_bad
+
+
+def test_cleanup_suspend_suspicious_still_moves_to_orphan_block():
+    """Suspicious handling is independent of suspend/apply mode — those
+    strategies move to `_suspended_strategies` (the orphan key the
+    scheduler doesn't read) regardless."""
+    cfg = {
+        "strategies": [
+            {"id": "weird", "args": ["vwap", "HYPE", "5m"]},
+        ],
+    }
+    summary = [
+        {"id": "weird", "status": "ok", "sharpe": 4.5, "return_pct": 1500,
+         "max_dd_pct": 20, "trades": 800},
+    ]
+    new_cfg, _ = cs.cleanup_config(cfg, summary, mode="suspend")
+    assert new_cfg["strategies"] == []  # weird left main list
+    assert [s["id"] for s in new_cfg["_suspended_strategies"]] == ["weird"]
+
+
+def test_cleanup_invalid_mode_raises():
+    with pytest.raises(ValueError, match="mode must be"):
+        cs.cleanup_config({"strategies": []}, [], mode="delete-everything")
+
+
+def test_main_suspend_writes_backup_and_marks_inactive(tmp_path, monkeypatch, capsys):
+    """End-to-end suspend run: backup exists, live config still contains
+    the DISCARD strategy but with active=false."""
+    cfg = {
+        "strategies": [
+            {"id": "good", "args": ["momentum", "BTC", "1h"], "active": True},
+            {"id": "bad",  "args": ["momentum", "ETH", "5m"], "active": True},
+        ],
+    }
+    summary = [
+        {"id": "good", "status": "ok", "sharpe": 1.0, "return_pct": 25, "max_dd_pct": 12, "trades": 60},
+        {"id": "bad",  "status": "ok", "sharpe": -10, "return_pct": -100, "max_dd_pct": 100, "trades": 5000},
+    ]
+    cfg_path = tmp_path / "config.json"
+    sum_path = tmp_path / "portfolio_summary.json"
+    cfg_path.write_text(json.dumps(cfg))
+    sum_path.write_text(json.dumps(summary))
+
+    monkeypatch.setattr(sys, "argv", [
+        "clean_strategies.py",
+        "--config", str(cfg_path),
+        "--summary", str(sum_path),
+        "--output-dir", str(tmp_path),
+        "--suspend",
+    ])
+    rc = cs.main()
+    assert rc == 0
+    cleaned = json.loads(cfg_path.read_text())
+    # Both still present.
+    assert [s["id"] for s in cleaned["strategies"]] == ["good", "bad"]
+    bad = next(s for s in cleaned["strategies"] if s["id"] == "bad")
+    assert bad["active"] is False
+    assert "_suspended_at" in bad
+    # Backup file exists with original active=True for 'bad'.
+    backups = list(tmp_path.glob("config.json.bak.*"))
+    assert len(backups) == 1
+    backed_up = json.loads(backups[0].read_text())
+    backed_bad = next(s for s in backed_up["strategies"] if s["id"] == "bad")
+    assert backed_bad["active"] is True
+    # Console output mentions SUSPENDED, not APPLIED-hard-delete.
+    out = capsys.readouterr().out
+    assert "SUSPENDED" in out
+
+
+def test_main_apply_and_suspend_are_mutually_exclusive(tmp_path, monkeypatch, capsys):
+    """argparse mutually-exclusive group must reject --apply --suspend
+    together (system exit with non-zero from argparse)."""
+    cfg = {"strategies": [{"id": "good", "args": ["momentum", "BTC", "1h"]}]}
+    summary = [{"id": "good", "status": "ok", "sharpe": 1.0, "return_pct": 25,
+                "max_dd_pct": 12, "trades": 60}]
+    cfg_path = tmp_path / "config.json"
+    sum_path = tmp_path / "portfolio_summary.json"
+    cfg_path.write_text(json.dumps(cfg))
+    sum_path.write_text(json.dumps(summary))
+
+    monkeypatch.setattr(sys, "argv", [
+        "clean_strategies.py",
+        "--config", str(cfg_path),
+        "--summary", str(sum_path),
+        "--output-dir", str(tmp_path),
+        "--apply", "--suspend",
+    ])
+    with pytest.raises(SystemExit) as excinfo:
+        cs.main()
+    assert excinfo.value.code != 0

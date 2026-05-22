@@ -14,9 +14,25 @@ produces:
                                     strategy with the verdict reason
 
 Default mode is dry-run — prints what WOULD happen and writes the report
-but does NOT touch the original config. With --apply, the live config is
-backed up to config.json.bak.<timestamp> and replaced with the cleaned
-version.
+but does NOT touch the original config. Three apply modes:
+
+  --apply      Hard delete DISCARD strategies (irreversible without git/backup)
+  --suspend    Soft remove: set active=false on DISCARD strategies, keep them
+               in `strategies` array with a `_suspended_at` timestamp and
+               `_suspended_reason` field. The scheduler skips active=false
+               entries on load, but they remain visible in the dashboard and
+               trivially restorable (flip the bool back).
+  (none)       Dry-run — write a report, no mutations.
+
+In all three cases the live config is backed up to
+``config.json.bak.<timestamp>`` before any write.
+
+`--suspend` is the operator-friendly default for the first pass after a
+fresh backtest — it preserves audit history (when was a strategy paused
+and why) and lets you A/B compare against the unfiltered Bot-A. Once
+Paper-Live confirms the verdict over a few weeks, you can either flip
+back to `--apply` (hard delete) or just leave the suspended block in
+place as a permanent record.
 
 Classification (top-trader thresholds, conservative — when in doubt the
 script defers to the operator):
@@ -43,11 +59,13 @@ script defers to the operator):
   UNTESTED    — no backtest result (data fetch failed, etc.); preserve
                 untouched and flag for manual review
 
-Cleanup action per class:
+Cleanup action per class (depends on mode):
 
-  DISCARD     → removed from `strategies` list
-  SUSPICIOUS  → moved to `_suspended_strategies` (kept in file but the
-                scheduler doesn't load that key; visible for audit)
+  DISCARD     → --apply:   removed from `strategies` list
+                --suspend: active=false in place, with _suspended_at +
+                           _suspended_reason metadata
+  SUSPICIOUS  → both modes: moved to `_suspended_strategies` (kept in
+                file but scheduler doesn't load that key)
   TUNE        → kept in `strategies` list, flagged in report
   KEEP        → kept
   EQUITY      → kept
@@ -195,21 +213,34 @@ def strategy_symbol(sc: dict) -> str:
     return ""
 
 
-def cleanup_config(cfg: dict, summary_rows: List[dict]) -> Tuple[dict, List[dict]]:
+def cleanup_config(cfg: dict, summary_rows: List[dict], mode: str = "apply") -> Tuple[dict, List[dict]]:
     """Run the cleanup transformation. Returns (new_cfg, decisions_list).
 
-    new_cfg has DISCARD removed from `strategies`, SUSPICIOUS moved to
-    `_suspended_strategies` array, everything else preserved with the
-    same dict identity.
+    `mode` controls how DISCARD strategies are handled:
+      "apply"   — hard delete from `strategies`
+      "suspend" — soft remove: set active=false in place, add metadata
+                  fields `_suspended_at` (ISO timestamp) and
+                  `_suspended_reason` (the classification reason). The
+                  Go scheduler treats `active: false` as "do not load",
+                  so the strategy is operationally dead but stays in
+                  the file for audit/restore.
+
+    SUSPICIOUS strategies are always moved to `_suspended_strategies`
+    (orthogonal key the scheduler doesn't read) — that behaviour is
+    independent of `mode` because a suspicious result requires manual
+    review either way.
 
     decisions_list is one dict per strategy, suitable for the markdown
     report:
       {"id": ..., "verdict": ..., "reason": ..., "summary": <row|None>}
     """
+    if mode not in ("apply", "suspend"):
+        raise ValueError(f"mode must be 'apply' or 'suspend', got {mode!r}")
     by_id = summary_lookup(summary_rows)
     keep: List[dict] = []
-    suspended: List[dict] = []
+    suspicious_block: List[dict] = []
     decisions: List[dict] = []
+    suspended_ts = datetime.now().isoformat(timespec="seconds")
     for sc in cfg.get("strategies", []) or []:
         sid = sc.get("id") or "?"
         row = by_id.get(sid)
@@ -225,16 +256,27 @@ def cleanup_config(cfg: dict, summary_rows: List[dict]) -> Tuple[dict, List[dict
             "strategy": sc,
         })
         if verdict == DISCARD:
-            continue  # drop entirely
+            if mode == "apply":
+                # Hard delete — strategy disappears from the file.
+                continue
+            # mode == "suspend": keep the entry but disable + annotate.
+            # Copy to avoid mutating the caller's strategy dict in-place;
+            # this matters for the test suite which reuses input fixtures.
+            suspended_sc = dict(sc)
+            suspended_sc["active"] = False
+            suspended_sc["_suspended_at"] = suspended_ts
+            suspended_sc["_suspended_reason"] = reason
+            keep.append(suspended_sc)
+            continue
         if verdict == SUSPICIOUS:
-            suspended.append(sc)
+            suspicious_block.append(sc)
             continue
         keep.append(sc)
 
     new_cfg = dict(cfg)
     new_cfg["strategies"] = keep
-    if suspended:
-        new_cfg["_suspended_strategies"] = suspended
+    if suspicious_block:
+        new_cfg["_suspended_strategies"] = suspicious_block
     elif "_suspended_strategies" in new_cfg:
         # If the operator's previous cleanup left an empty key, prune it.
         del new_cfg["_suspended_strategies"]
@@ -242,18 +284,28 @@ def cleanup_config(cfg: dict, summary_rows: List[dict]) -> Tuple[dict, List[dict
 
 
 def render_markdown_report(decisions: List[dict], cfg_path: str, summary_path: str,
-                           applied: bool) -> str:
-    """Generate the operator-facing cleanup report."""
+                           mode_label: str) -> str:
+    """Generate the operator-facing cleanup report.
+
+    `mode_label` is one of: "DRY-RUN", "APPLIED (hard delete)",
+    "APPLIED (suspend)" — controls the header and the "what happened to
+    the DISCARDs" wording.
+    """
     counts = {KEEP: 0, TUNE: 0, DISCARD: 0, SUSPICIOUS: 0, EQUITY: 0, UNTESTED: 0}
     for d in decisions:
         counts[d["verdict"]] = counts.get(d["verdict"], 0) + 1
 
-    mode = "APPLIED" if applied else "DRY-RUN (no files mutated)"
+    is_suspend_mode = "suspend" in mode_label.lower()
+    discard_outcome = (
+        "set to `active: false` in-place (reversible)" if is_suspend_mode
+        else "REMOVED from cleaned config"
+    )
+
     lines = [
         "# Strategy Cleanup Report",
         "",
         f"_Generated: {datetime.now().isoformat(timespec='seconds')}_",
-        f"_Mode: **{mode}**_",
+        f"_Mode: **{mode_label}**_",
         f"_Source config: `{cfg_path}`_",
         f"_Backtest summary: `{summary_path}`_",
         "",
@@ -263,7 +315,7 @@ def render_markdown_report(decisions: List[dict], cfg_path: str, summary_path: s
         f"- **KEEP**: {counts[KEEP]} (passed all bars — live-candidate quality)",
         f"- **TUNE**: {counts[TUNE]} (marginal — has signal but not live-ready)",
         f"- **SUSPICIOUS**: {counts[SUSPICIOUS]} (Sharpe ≥ 3.0 → moved to `_suspended_strategies`, manual review required)",
-        f"- **DISCARD**: {counts[DISCARD]} (catastrophic — REMOVED from cleaned config)",
+        f"- **DISCARD**: {counts[DISCARD]} (catastrophic — {discard_outcome})",
         f"- **EQUITY**: {counts[EQUITY]} (Robinhood stocks — preserved, no backtest data path yet)",
         f"- **UNTESTED**: {counts[UNTESTED]} (no result — preserved for manual review)",
         "",
@@ -282,8 +334,13 @@ def render_markdown_report(decisions: List[dict], cfg_path: str, summary_path: s
 
     # One section per verdict so the operator can scan top-down.
     order = [DISCARD, SUSPICIOUS, TUNE, KEEP, UNTESTED, EQUITY]
+    discard_section_title = (
+        "Discarded — set to `active: false` in-place (reversible)"
+        if is_suspend_mode
+        else "Discarded — REMOVED from cleaned config"
+    )
     headings = {
-        DISCARD: ("Discarded — REMOVED from cleaned config", "danger"),
+        DISCARD: (discard_section_title, "danger"),
         SUSPICIOUS: ("Suspicious — moved to `_suspended_strategies`", "warn"),
         TUNE: ("Needs Tuning — preserved, flagged for parameter work", "info"),
         KEEP: ("Keep — live-candidate quality", "good"),
@@ -317,28 +374,40 @@ def render_markdown_report(decisions: List[dict], cfg_path: str, summary_path: s
 
     # Operator-facing next-actions block — important so the report is
     # actionable without context-switching to chat.
+    discard_action = (
+        "these strategies are now `active: false` — restart the scheduler to take effect"
+        if is_suspend_mode and "APPLIED" in mode_label
+        else "these strategies will be gone after `--apply` or paused after `--suspend`"
+    )
     lines += [
         "## Next Actions",
         "",
-        "1. **Read the DISCARD section above** — these strategies will be gone after `--apply`.",
+        f"1. **Read the DISCARD section above** — {discard_action}.",
         "2. **Investigate SUSPICIOUS strategies** — open per_strategy/<id>.md from the same backtest run and inspect the trade log. Common red flags: unrealistic Sharpe on a thinly-traded asset, look-ahead in the strategy code, fitted parameters.",
         "3. **TUNE strategies** stay live for now but are NOT live-money candidates. Plan a walk-forward optimizer pass before moving any to real capital.",
         "4. **UNTESTED strategies** need either a data fix (check the backtest stderr) or removal.",
-        "5. **EQUITY strategies** are parked until Phase 7c builds a yfinance/Polygon adapter.",
+        "5. **EQUITY strategies** are parked until a Polygon/Alpaca adapter replaces yfinance (Phase 7d).",
         "",
     ]
-    if not applied:
+    if "DRY-RUN" in mode_label:
         lines += [
             "## To apply",
             "",
+            "Two apply modes — pick the one that matches your risk tolerance:",
+            "",
+            "**Soft (recommended for first pass):**",
+            "```",
+            "uv run --no-sync python scripts/clean_strategies.py --suspend",
+            "```",
+            "Sets `active: false` on DISCARD strategies — reversible, audit-friendly.",
+            "",
+            "**Hard delete (after you've validated suspend with paper-live):**",
             "```",
             "uv run --no-sync python scripts/clean_strategies.py --apply",
             "```",
             "",
-            "On `--apply`:",
-            "- A backup of the original config is written to `<config>.bak.<timestamp>`",
-            "- The cleaned config is written in place",
-            "- Restart the scheduler: `sudo systemctl restart go-trader`",
+            "In both cases a backup is written to `<config>.bak.<timestamp>`.",
+            "After either, restart the scheduler: `sudo systemctl restart go-trader`",
             "",
         ]
     return "\n".join(lines)
@@ -354,8 +423,15 @@ def main() -> int:
                         help="path to portfolio_summary.json; defaults to the latest under reports/")
     parser.add_argument("--reports-dir", default="reports",
                         help="reports directory for --summary auto-discovery (default: %(default)s)")
-    parser.add_argument("--apply", action="store_true",
-                        help="actually write the cleaned config; otherwise dry-run")
+    # --apply and --suspend are mutually exclusive — both mutate the
+    # live config, just in different ways. Default (neither set) is
+    # dry-run with a `config.cleaned.json` preview written next to the
+    # source config.
+    write_mode = parser.add_mutually_exclusive_group()
+    write_mode.add_argument("--apply", action="store_true",
+                            help="hard-delete DISCARD strategies from the live config (with backup)")
+    write_mode.add_argument("--suspend", action="store_true",
+                            help="soft-remove DISCARD strategies: set active=false in place (reversible)")
     parser.add_argument("--output-dir", default=None,
                         help="where to write the cleanup_report.md (default: alongside --summary)")
     args = parser.parse_args()
@@ -378,7 +454,18 @@ def main() -> int:
     with open(summary_path) as f:
         summary_rows = json.load(f)
 
-    new_cfg, decisions = cleanup_config(cfg, summary_rows)
+    # Mode selection — argparse already enforces mutual exclusion.
+    if args.apply:
+        mode = "apply"
+        mode_label = "APPLIED (hard delete)"
+    elif args.suspend:
+        mode = "suspend"
+        mode_label = "APPLIED (suspend — active=false in place)"
+    else:
+        mode = "apply"  # cleanup_config branches the same way for dry-run
+        mode_label = "DRY-RUN (no files mutated)"
+
+    new_cfg, decisions = cleanup_config(cfg, summary_rows, mode=mode)
 
     counts = {}
     for d in decisions:
@@ -388,7 +475,7 @@ def main() -> int:
     os.makedirs(output_dir, exist_ok=True)
     report_path = os.path.join(output_dir, "cleanup_report.md")
 
-    if args.apply:
+    if args.apply or args.suspend:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = f"{args.config}.bak.{ts}"
         shutil.copy2(args.config, backup_path)
@@ -396,8 +483,9 @@ def main() -> int:
         with open(cleaned_path, "w") as f:
             json.dump(new_cfg, f, indent=2)
         with open(report_path, "w") as f:
-            f.write(render_markdown_report(decisions, args.config, summary_path, applied=True))
-        print(f"APPLIED. Backup → {backup_path}")
+            f.write(render_markdown_report(decisions, args.config, summary_path, mode_label=mode_label))
+        action = "APPLIED (hard delete)" if args.apply else "SUSPENDED (active=false)"
+        print(f"{action}. Backup → {backup_path}")
         print(f"Cleaned config written: {cleaned_path}")
     else:
         cleaned_path = os.path.join(
@@ -406,7 +494,7 @@ def main() -> int:
         with open(cleaned_path, "w") as f:
             json.dump(new_cfg, f, indent=2)
         with open(report_path, "w") as f:
-            f.write(render_markdown_report(decisions, args.config, summary_path, applied=False))
+            f.write(render_markdown_report(decisions, args.config, summary_path, mode_label=mode_label))
         print(f"DRY-RUN. Cleaned preview → {cleaned_path}")
 
     print(f"Report → {report_path}")
