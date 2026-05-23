@@ -50,6 +50,11 @@ import pandas as pd
 # on availability, they should wrap the import themselves.
 import yfinance as yf
 
+# Phase 7e: Alpaca is the preferred equity data source because yfinance
+# caps intraday history at 7/60 days, which makes 2-year backtests
+# impossible. We import it lazily inside load_equity_ohlcv so callers
+# without Alpaca creds keep the pure-yfinance path with zero overhead.
+
 
 # Map our codebase's timeframe strings (matching shared_tools/data_fetcher
 # and the strategy configs) onto yfinance's interval strings.
@@ -153,6 +158,48 @@ def _cached_fetch(ticker: str, yf_interval: str, start: Optional[str], end: Opti
     return _normalise_dataframe(raw)
 
 
+def _try_alpaca(ticker: str, timeframe: str, start_date: Optional[str],
+                end_date: Optional[str]) -> Optional[pd.DataFrame]:
+    """Try the Alpaca adapter if creds are present.
+
+    Returns:
+        None if Alpaca is not configured (caller falls back to yfinance).
+        Empty DataFrame on Alpaca-specific data failure (caller keeps the
+        Alpaca verdict — no automatic yfinance fallback, otherwise an
+        operator with bad keys would silently get truncated yfinance data
+        and assume Alpaca worked).
+        Non-empty DataFrame on success.
+
+    Lazy-imported so the pure-yfinance path has no startup overhead.
+    """
+    try:
+        # Local import keeps the yfinance-only path light. The module
+        # exists in shared_tools/ alongside this one, so the import path
+        # works whether callers put shared_tools/ on sys.path or import
+        # via the package.
+        import alpaca_data_fetcher as alpaca
+    except ImportError:
+        return None  # shouldn't happen — file is checked in — but be defensive
+    if not alpaca.is_available():
+        return None
+    try:
+        return alpaca.load_equity_ohlcv(ticker, timeframe, start_date, end_date)
+    except alpaca.AlpacaCredentialsMissing:
+        # Keys were present in env but rejected by the API → don't fall
+        # through to yfinance silently. Treat it as a data error so the
+        # operator notices and rotates the key.
+        print(f"[equity-fetch] {ticker}: Alpaca creds rejected, "
+              f"NOT falling back to yfinance (truncated history would mislead)",
+              file=sys.stderr)
+        return pd.DataFrame()
+    except Exception as exc:
+        # Network or library bug — fall through to yfinance so the bot
+        # keeps working even with a partial Alpaca outage.
+        print(f"[equity-fetch] {ticker}: Alpaca error '{exc}', "
+              f"falling back to yfinance", file=sys.stderr)
+        return None
+
+
 def load_equity_ohlcv(
     ticker: str,
     timeframe: str = "1d",
@@ -161,11 +208,17 @@ def load_equity_ohlcv(
 ) -> pd.DataFrame:
     """Load OHLCV for an equity ticker.
 
+    Provider precedence (Phase 7e):
+      1. Alpaca, if ``ALPACA_API_KEY`` + ``ALPACA_API_SECRET`` are set in
+         the env. Free tier gives 5+ years of 1m history vs yfinance's
+         7-day cap.
+      2. yfinance fallback. Limited intraday history but no auth needed.
+
     Args:
         ticker: bare ticker (``"AAPL"``, ``"NVDA"``). Not a pair.
         timeframe: human label like ``"5m"`` / ``"1h"`` / ``"1d"``.
-        start_date: ``"YYYY-MM-DD"`` (inclusive); ``None`` lets yfinance
-            pick a sensible default.
+        start_date: ``"YYYY-MM-DD"`` (inclusive); ``None`` lets the
+            provider pick a sensible default.
         end_date: ``"YYYY-MM-DD"`` (exclusive). ``None`` = up to now.
 
     Returns an empty DataFrame on any failure so callers can degrade
@@ -175,6 +228,13 @@ def load_equity_ohlcv(
     ticker = (ticker or "").strip().upper()
     if not ticker:
         return pd.DataFrame()
+
+    # Try Alpaca first — only matters when creds are set.
+    alpaca_df = _try_alpaca(ticker, timeframe, start_date, end_date)
+    if alpaca_df is not None:
+        # Either non-empty success OR a credentials-rejected empty
+        # response we should NOT mask with yfinance.
+        return alpaca_df
 
     yf_interval = _TIMEFRAME_MAP.get(timeframe.lower())
     if not yf_interval:

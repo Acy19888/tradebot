@@ -157,10 +157,13 @@ def test_load_equity_ohlcv_yfinance_exception_returns_empty(mocker, capsys):
     assert "failed" in capsys.readouterr().err.lower()
 
 
-def test_load_equity_ohlcv_normalises_us_eastern_to_utc(mocker):
+def test_load_equity_ohlcv_normalises_us_eastern_to_utc(mocker, monkeypatch):
     """Real yfinance intraday data arrives in US/Eastern; the adapter
     must convert to UTC so downstream pandas math against crypto data
     (UTC) is comparable."""
+    # Ensure no Alpaca routing — this test is yfinance-specific.
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
     raw = pd.DataFrame({
         "Open": [100.0],
         "High": [101.0],
@@ -174,3 +177,90 @@ def test_load_equity_ohlcv_normalises_us_eastern_to_utc(mocker):
     assert str(out.index.tz) == "UTC"
     # 09:30 ET on June 3 = 13:30 UTC (DST in effect).
     assert out.index[0].hour == 13
+
+
+# --------------------------------------------------------------------
+# Phase 7e — Alpaca provider routing
+# --------------------------------------------------------------------
+
+def test_provider_falls_back_to_yfinance_when_alpaca_creds_missing(mocker, monkeypatch):
+    """Without ALPACA_API_KEY/SECRET in env, _try_alpaca returns None
+    and the function continues to yfinance — the legacy path stays
+    unchanged for users who haven't set up Alpaca."""
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_API_SECRET", raising=False)
+    fake_yf = pd.DataFrame({
+        "Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1.0],
+    }, index=pd.DatetimeIndex(["2024-06-01"], tz="UTC", name="Datetime"))
+    mock_yf = mocker.patch.object(edf.yf, "download", return_value=fake_yf)
+    out = edf.load_equity_ohlcv("AAPL", timeframe="1d", start_date="2024-01-01")
+    assert not out.empty
+    # yfinance was the actual source.
+    mock_yf.assert_called_once()
+
+
+def test_provider_routes_to_alpaca_when_creds_present(mocker, monkeypatch):
+    """With creds set, the alpaca path runs and yfinance is NOT called —
+    that's the Phase 7e value: 5+ years of 1m history instead of yfinance's
+    7-day cap."""
+    monkeypatch.setenv("ALPACA_API_KEY", "fake-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "fake-secret")
+
+    # Stub the Alpaca adapter's load_equity_ohlcv to return a non-empty DF.
+    fake_alpaca = pd.DataFrame({
+        "open": [100.0], "high": [101.0], "low": [99.0],
+        "close": [100.5], "volume": [12345.0],
+    }, index=pd.DatetimeIndex(["2024-06-01 13:30"], tz="UTC", name="datetime"))
+
+    import alpaca_data_fetcher as adf_mod
+    mocker.patch.object(adf_mod, "load_equity_ohlcv", return_value=fake_alpaca)
+    mock_yf = mocker.patch.object(edf.yf, "download")
+
+    out = edf.load_equity_ohlcv("AAPL", timeframe="1m", start_date="2024-01-01")
+    assert not out.empty
+    assert out.iloc[0]["close"] == 100.5
+    # yfinance must NOT have been called — that's the whole point.
+    mock_yf.assert_not_called()
+
+
+def test_provider_alpaca_creds_rejected_returns_empty_no_yfinance_fallback(mocker, monkeypatch):
+    """If keys are set but Alpaca rejects them, we return EMPTY rather
+    than silently falling back to yfinance. Reason: yfinance would give
+    truncated intraday history and the operator would assume Alpaca worked.
+    Better to fail visibly so the operator rotates the key."""
+    monkeypatch.setenv("ALPACA_API_KEY", "bad-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "bad-secret")
+
+    import alpaca_data_fetcher as adf_mod
+    def raise_creds(*a, **kw):
+        raise adf_mod.AlpacaCredentialsMissing("rejected")
+    mocker.patch.object(adf_mod, "load_equity_ohlcv", side_effect=raise_creds)
+    mock_yf = mocker.patch.object(edf.yf, "download")
+
+    out = edf.load_equity_ohlcv("AAPL", timeframe="1d", start_date="2024-01-01")
+    assert out.empty
+    # Critically, no yfinance fallback when auth fails — the operator
+    # needs to notice the bad key, not get masked data.
+    mock_yf.assert_not_called()
+
+
+def test_provider_alpaca_generic_error_falls_back_to_yfinance(mocker, monkeypatch):
+    """Network/library errors (NOT auth) should fall through to yfinance
+    so the bot keeps working even with a partial Alpaca outage."""
+    monkeypatch.setenv("ALPACA_API_KEY", "fake-key")
+    monkeypatch.setenv("ALPACA_API_SECRET", "fake-secret")
+
+    import alpaca_data_fetcher as adf_mod
+    mocker.patch.object(adf_mod, "load_equity_ohlcv",
+                        side_effect=RuntimeError("alpaca DNS lookup failed"))
+
+    fake_yf = pd.DataFrame({
+        "Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1.0],
+    }, index=pd.DatetimeIndex(["2024-06-01"], tz="UTC", name="Datetime"))
+    mock_yf = mocker.patch.object(edf.yf, "download", return_value=fake_yf)
+
+    out = edf.load_equity_ohlcv("AAPL", timeframe="1d", start_date="2024-01-01")
+    assert not out.empty
+    # yfinance fallback WAS called — graceful degradation when Alpaca
+    # has a transient issue.
+    mock_yf.assert_called_once()

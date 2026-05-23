@@ -12,6 +12,7 @@ dependencies = [
     "pyotp>=2.9.0",
     "yfinance>=0.2.0",
     "tzdata>=2024.1",
+    "requests>=2.31.0",
 ]
 
 [project.optional-dependencies]
