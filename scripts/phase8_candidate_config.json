@@ -1,0 +1,60 @@
+{
+  "_doc": "Phase 8a candidate config — Donchian Breakout 4h on BTC + ETH, Long-only with ATR-trailing-stop. Used ONLY by scripts/backtest_portfolio.py for evidence-based validation BEFORE going live. NOT loaded by the scheduler. After the backtest confirms Sharpe >= 0.8 in both the full window and an out-of-sample 2025+ split, these strategies are copied into /opt/go-trader/scheduler/config.json and the live scheduler is restarted.",
+  "_rationale": {
+    "asset_choice": "BTC + ETH only — highest liquidity in HL perps, longest data history, lowest correlation among major-cap crypto (~0.7 historical). Two assets = some diversification without forcing the runner to find too many edges.",
+    "timeframe": "4h. Six bars per day = 5500 bars in 2.5 years. Low enough frequency that the 0.035% HL taker fee is negligible per trade. High enough that we get statistically meaningful trade counts (estimated 20-60 trades/year).",
+    "strategy": "donchian_breakout — classic Turtle Trading system with documented positive edge in trending crypto markets since 2010. No-lookahead shifted channel (verified in shared_strategies/open/donchian_breakout.py).",
+    "params_entry_55_exit_20": "Long-term Turtle (System 1 in the Dennis/Eckhardt paper). 55-bar entry on 4h = ~9 days lookback for new highs. 20-bar exit = ~3 days for tighter exit channel. Filters out 4h noise that would trigger 20/10 short-term Turtle.",
+    "direction_long_only": "V1 is long-only. Crypto trends are asymmetric — bull trends last months, bear trends are violent and short. Adding shorts before validating long-only would mix two different edges and make attribution impossible.",
+    "stop_loss_atr_2x": "Stop at avg_cost - 2*ATR(14) at entry, NOT trailing in V1. Turtle's original 2N stop. V2 can add trailing once we trust the entry/exit core.",
+    "capital_5000_each": "$5k per strategy of Bot-B's ~$80k paper balance. Total deployable: $10k = 12.5% of equity. Conservative on purpose — we don't size up until live performance confirms the backtest.",
+    "no_leverage": "leverage=1 (no leverage). Mathematical exposure to the asset, nothing more. Adding leverage before validating un-leveraged Sharpe is gambling, not trading."
+  },
+  "_backtest_only": true,
+  "interval_seconds": 14400,
+  "log_dir": "logs",
+  "strategies": [
+    {
+      "id": "phase8-btc-donchian-4h",
+      "type": "perps",
+      "platform": "hyperliquid",
+      "script": "shared_scripts/check_hyperliquid.py",
+      "args": ["donchian_breakout", "BTC", "4h", "--mode=paper"],
+      "open_strategy": {
+        "name": "donchian_breakout",
+        "params": {
+          "entry_period": 55,
+          "exit_period": 20
+        }
+      },
+      "direction": "long",
+      "capital": 5000,
+      "initial_capital": 5000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0,
+      "leverage": 1,
+      "sizing_leverage": 1
+    },
+    {
+      "id": "phase8-eth-donchian-4h",
+      "type": "perps",
+      "platform": "hyperliquid",
+      "script": "shared_scripts/check_hyperliquid.py",
+      "args": ["donchian_breakout", "ETH", "4h", "--mode=paper"],
+      "open_strategy": {
+        "name": "donchian_breakout",
+        "params": {
+          "entry_period": 55,
+          "exit_period": 20
+        }
+      },
+      "direction": "long",
+      "capital": 5000,
+      "initial_capital": 5000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0,
+      "leverage": 1,
+      "sizing_leverage": 1
+    }
+  ]
+}
