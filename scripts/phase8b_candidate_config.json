@@ -1,0 +1,54 @@
+{
+  "_doc": "Phase 8b candidate config — two new Donchian variants. Backtest-only, NOT loaded by the scheduler.",
+  "_candidates": {
+    "btc_donchian_1d": "Hypothesis: 1d timeframe → fewer whipsaws than 4h, higher robustness. Trade count drops (estimated 4-10/year vs ~20/year on 4h) but per-trade-edge should rise. If BTC 4h gave Sharpe 0.98 full / 0.11 OOS, then BTC 1d on the same data should be more stable across regimes.",
+    "sol_donchian_4h": "Hypothesis: SOL has historically higher beta than BTC + more violent trends. Same Donchian 55/20 setup. Tests whether the strategy generalises across major-cap crypto perps OR whether BTC was a fluke. If SOL gives positive Sharpe, the Donchian edge is real and asset-agnostic; if SOL stinks, BTC was 2024-Bullrun-luck."
+  },
+  "_backtest_only": true,
+  "interval_seconds": 14400,
+  "log_dir": "logs",
+  "strategies": [
+    {
+      "id": "phase8b-btc-donchian-1d",
+      "type": "perps",
+      "platform": "hyperliquid",
+      "script": "shared_scripts/check_hyperliquid.py",
+      "args": ["donchian_breakout", "BTC", "1d", "--mode=paper"],
+      "open_strategy": {
+        "name": "donchian_breakout",
+        "params": {
+          "entry_period": 55,
+          "exit_period": 20
+        }
+      },
+      "direction": "long",
+      "capital": 5000,
+      "initial_capital": 5000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0,
+      "leverage": 1,
+      "sizing_leverage": 1
+    },
+    {
+      "id": "phase8b-sol-donchian-4h",
+      "type": "perps",
+      "platform": "hyperliquid",
+      "script": "shared_scripts/check_hyperliquid.py",
+      "args": ["donchian_breakout", "SOL", "4h", "--mode=paper"],
+      "open_strategy": {
+        "name": "donchian_breakout",
+        "params": {
+          "entry_period": 55,
+          "exit_period": 20
+        }
+      },
+      "direction": "long",
+      "capital": 5000,
+      "initial_capital": 5000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0,
+      "leverage": 1,
+      "sizing_leverage": 1
+    }
+  ]
+}
