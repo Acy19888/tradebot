@@ -1,0 +1,55 @@
+{
+  "_doc": "Phase 8d — last round of trend-class diversification. Two trend strategies that AREN'T pure breakout-by-channel — used to test whether Phase 8a's edge is in the Donchian channel logic specifically or in 'any trend filter + ATR stop'.",
+  "_hypothesis": {
+    "adx_trend_4h": "ADX Trend Rider only enters when ADX > 25 — a regime filter Donchian lacks. Theory: skipping flat/choppy markets (ADX < 25) is where Donchian loses money. If ADX-gated trend matches or beats Donchian, the regime filter IS the edge, not the entry signal.",
+    "supertrend_4h": "ATR-based trend-following with dynamic support/resistance. Same indicator family as Donchian (trend-following) but volatility-adjusted entry/exit lines instead of fixed lookback channels. Tests robustness across implementation variants of the same trend idea.",
+    "expected_outcome": "If both underperform Phase 8a OOS, we've empirically validated that Phase 8a is the optimal single-strategy choice for BTC and we stop iterating. If one beats 8a, we have a new candidate."
+  },
+  "_backtest_only": true,
+  "interval_seconds": 14400,
+  "log_dir": "logs",
+  "strategies": [
+    {
+      "id": "phase8d-btc-adx-trend-4h",
+      "type": "perps",
+      "platform": "hyperliquid",
+      "script": "shared_scripts/check_hyperliquid.py",
+      "args": ["adx_trend", "BTC", "4h", "--mode=paper"],
+      "open_strategy": {
+        "name": "adx_trend",
+        "params": {
+          "adx_period": 14,
+          "adx_threshold": 25
+        }
+      },
+      "direction": "long",
+      "capital": 5000,
+      "initial_capital": 5000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0,
+      "leverage": 1,
+      "sizing_leverage": 1
+    },
+    {
+      "id": "phase8d-btc-supertrend-4h",
+      "type": "perps",
+      "platform": "hyperliquid",
+      "script": "shared_scripts/check_hyperliquid.py",
+      "args": ["supertrend", "BTC", "4h", "--mode=paper"],
+      "open_strategy": {
+        "name": "supertrend",
+        "params": {
+          "atr_period": 10,
+          "multiplier": 3.0
+        }
+      },
+      "direction": "long",
+      "capital": 5000,
+      "initial_capital": 5000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0,
+      "leverage": 1,
+      "sizing_leverage": 1
+    }
+  ]
+}
