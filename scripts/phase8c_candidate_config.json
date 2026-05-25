@@ -1,0 +1,81 @@
+{
+  "_doc": "Phase 8c candidate config — three different strategy CLASSES (not just Donchian variants) on BTC. Backtest-only.",
+  "_hypothesis": {
+    "rsi_mean_reversion_1h": "Donchian failed on chop. RSI mean-reversion is the opposite: it WORKS in choppy markets, fails in trends. If RSI gives positive Sharpe OOS, we have a complementary edge to BTC 4h Donchian — they're negatively correlated by design.",
+    "squeeze_momentum_4h": "Bollinger-inside-Keltner detects compression; the breakout direction is confirmed by linear-regression momentum. Different signal logic than Donchian breakout — catches the EXPANSION after low-vola periods, not just new highs.",
+    "tema_cross_4h_long": "Triple-EMA crossover (5/13/34) with long-EMA trend filter. Same Long-only constraint as Phase 8a, but the entry/exit logic is smoother than Donchian (no abrupt channel breaks, gradual EMA cross). Tests whether the BTC edge is in the indicator or in the timeframe."
+  },
+  "_backtest_only": true,
+  "interval_seconds": 14400,
+  "log_dir": "logs",
+  "strategies": [
+    {
+      "id": "phase8c-btc-rsi-1h",
+      "type": "perps",
+      "platform": "hyperliquid",
+      "script": "shared_scripts/check_hyperliquid.py",
+      "args": ["rsi", "BTC", "1h", "--mode=paper"],
+      "open_strategy": {
+        "name": "rsi",
+        "params": {
+          "period": 14,
+          "overbought": 70,
+          "oversold": 30
+        }
+      },
+      "direction": "long",
+      "capital": 5000,
+      "initial_capital": 5000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0,
+      "leverage": 1,
+      "sizing_leverage": 1
+    },
+    {
+      "id": "phase8c-btc-squeeze-4h",
+      "type": "perps",
+      "platform": "hyperliquid",
+      "script": "shared_scripts/check_hyperliquid.py",
+      "args": ["squeeze_momentum", "BTC", "4h", "--mode=paper"],
+      "open_strategy": {
+        "name": "squeeze_momentum",
+        "params": {
+          "bb_period": 20,
+          "bb_std": 2.0,
+          "kc_period": 20,
+          "kc_mult": 1.5,
+          "mom_lookback": 12
+        }
+      },
+      "direction": "long",
+      "capital": 5000,
+      "initial_capital": 5000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0,
+      "leverage": 1,
+      "sizing_leverage": 1
+    },
+    {
+      "id": "phase8c-btc-tema-cross-4h",
+      "type": "perps",
+      "platform": "hyperliquid",
+      "script": "shared_scripts/check_hyperliquid.py",
+      "args": ["tema_cross", "BTC", "4h", "--mode=paper"],
+      "open_strategy": {
+        "name": "tema_cross",
+        "params": {
+          "short_period": 5,
+          "mid_period": 13,
+          "long_period": 34
+        }
+      },
+      "direction": "long",
+      "capital": 5000,
+      "initial_capital": 5000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0,
+      "leverage": 1,
+      "sizing_leverage": 1
+    }
+  ]
+}
