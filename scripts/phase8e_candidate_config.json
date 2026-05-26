@@ -1,0 +1,111 @@
+{
+  "_doc": "Phase 8e — Donchian Breakout 1d Long-only auf 5 Major-Equities. Backtest-only.",
+  "_hypothesis": "Aktien-Märkte sind historisch bessere Trend-Folger als Crypto (S&P seit 1928 ~8%/Jahr Trend; NVDA 2024 +180%). Die 19 alten Robinhood-Strategien (5m Day-Trading) sind alle gescheitert wegen Spread + Fees + Robinhood-Routing. Aber 1d-Donchian-Breakout mit ATR-Stop ist mathematisch eine ganz andere Klasse: niedrige Frequenz, hoher Pro-Trade-Edge, robust gegen Friction. Test ob die Phase-8a-Logik auf Aktien generalisiert.",
+  "_assets": {
+    "SPY": "S&P 500 ETF — die langweiligste Trend-Maschine der Welt. Wenn Donchian hier nicht funktioniert, ist die Strategy-Klasse defekt.",
+    "AAPL": "Apple — eines der trendingsten Mega-Caps der letzten 10 Jahre",
+    "NVDA": "Nvidia — AI-Bubble-Trend 2023-2024; testet aggressiv-trending Single-Stocks",
+    "MSFT": "Microsoft — stabiler Mega-Cap-Trend",
+    "QQQ": "Nasdaq-100 ETF — tech-heavy, höhere Vola als SPY"
+  },
+  "_backtest_only": true,
+  "interval_seconds": 86400,
+  "log_dir": "logs",
+  "strategies": [
+    {
+      "id": "phase8e-spy-donchian-1d",
+      "type": "spot",
+      "platform": "robinhood",
+      "script": "shared_scripts/check_robinhood.py",
+      "args": ["donchian_breakout", "SPY", "1d", "--mode=paper"],
+      "open_strategy": {
+        "name": "donchian_breakout",
+        "params": {
+          "entry_period": 55,
+          "exit_period": 20
+        }
+      },
+      "direction": "long",
+      "capital": 10000,
+      "initial_capital": 10000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0
+    },
+    {
+      "id": "phase8e-aapl-donchian-1d",
+      "type": "spot",
+      "platform": "robinhood",
+      "script": "shared_scripts/check_robinhood.py",
+      "args": ["donchian_breakout", "AAPL", "1d", "--mode=paper"],
+      "open_strategy": {
+        "name": "donchian_breakout",
+        "params": {
+          "entry_period": 55,
+          "exit_period": 20
+        }
+      },
+      "direction": "long",
+      "capital": 10000,
+      "initial_capital": 10000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0
+    },
+    {
+      "id": "phase8e-nvda-donchian-1d",
+      "type": "spot",
+      "platform": "robinhood",
+      "script": "shared_scripts/check_robinhood.py",
+      "args": ["donchian_breakout", "NVDA", "1d", "--mode=paper"],
+      "open_strategy": {
+        "name": "donchian_breakout",
+        "params": {
+          "entry_period": 55,
+          "exit_period": 20
+        }
+      },
+      "direction": "long",
+      "capital": 10000,
+      "initial_capital": 10000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0
+    },
+    {
+      "id": "phase8e-msft-donchian-1d",
+      "type": "spot",
+      "platform": "robinhood",
+      "script": "shared_scripts/check_robinhood.py",
+      "args": ["donchian_breakout", "MSFT", "1d", "--mode=paper"],
+      "open_strategy": {
+        "name": "donchian_breakout",
+        "params": {
+          "entry_period": 55,
+          "exit_period": 20
+        }
+      },
+      "direction": "long",
+      "capital": 10000,
+      "initial_capital": 10000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0
+    },
+    {
+      "id": "phase8e-qqq-donchian-1d",
+      "type": "spot",
+      "platform": "robinhood",
+      "script": "shared_scripts/check_robinhood.py",
+      "args": ["donchian_breakout", "QQQ", "1d", "--mode=paper"],
+      "open_strategy": {
+        "name": "donchian_breakout",
+        "params": {
+          "entry_period": 55,
+          "exit_period": 20
+        }
+      },
+      "direction": "long",
+      "capital": 10000,
+      "initial_capital": 10000,
+      "max_drawdown_pct": 30,
+      "stop_loss_atr_mult": 2.0
+    }
+  ]
+}
